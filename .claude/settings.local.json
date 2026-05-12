@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(cmd /c \"dir /s /b C:\\\\Users\\\\User\\\\Documents\\\\orlanda\\\\linked_in_bot\")",
+      "PowerShell($json = Get-Content \"C:\\\\Users\\\\User\\\\Documents\\\\orlanda\\\\linked_in_bot\\\\posts.json\" -Raw | ConvertFrom-Json; $json.Count)"
+    ]
+  }
+}

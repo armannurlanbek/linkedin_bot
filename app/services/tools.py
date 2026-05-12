@@ -1,0 +1,83 @@
+"""Anthropic tool schemas and execution dispatcher."""
+
+from app.services.scraper import scrape
+from app.services.search import search_project_info
+from app.services.retrieval import get_similar_posts
+
+TOOLS = [
+    {
+        "name": "scrape_url",
+        "description": "Fetch an article or building page from a URL. Returns title, full body text, and image URLs. Call this first when the user provides a URL.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"url": {"type": "string", "description": "Full URL to fetch"}},
+            "required": ["url"]
+        }
+    },
+    {
+        "name": "search_web",
+        "description": "Search the web for project details: developer, main contractor, architect, facade contractor. Use the building name as the query.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"query": {"type": "string", "description": "Search query"}},
+            "required": ["query"]
+        }
+    },
+    {
+        "name": "retrieve_similar_posts",
+        "description": "Retrieve similar past LinkedIn posts from the CEO archive for writing style reference.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Topic or building type"},
+                "n": {"type": "integer", "description": "Number of posts (default 5)"}
+            },
+            "required": ["query"]
+        }
+    }
+]
+
+
+def execute_tool(name: str, args: dict, db) -> dict:
+    if name == "scrape_url":
+        return scrape(args["url"])
+    if name == "search_web":
+        raw = search_project_info(args["query"])
+        sources = [l[len("Source:"):].strip() for l in raw.splitlines() if l.startswith("Source:")]
+        return {"results": raw, "source_count": len(sources), "sources": sources, "has_answer": bool(raw)}
+    if name == "retrieve_similar_posts":
+        results = get_similar_posts(db, args["query"], args.get("n", 8))
+        # Format as a style guide so Claude knows how to use the examples
+        sections = []
+        for i, item in enumerate(results, 1):
+            sim_pct = int(item["similarity"] * 100)
+            sections.append(
+                f"[פוסט דומה {i} — דמיון {sim_pct}%]\n{item['text']}"
+            )
+        formatted = (
+            "להלן פוסטים אמיתיים של רומן על נושאים קרובים.\n"
+            "השתמש בהם כתבנית: העתק את מבנה הפתיחה, קצב הפסקאות, האיזון טכני/שיחתי, וסגנון הסיום.\n\n"
+            + "\n\n---\n\n".join(sections)
+        )
+        return {"style_examples": formatted, "count": len(results)}
+    return {"error": f"Unknown tool: {name}"}
+
+
+def summarize_result(name: str, result: dict) -> str:
+    if name == "scrape_url":
+        chars = len(result.get("text", ""))
+        imgs = len(result.get("images", []))
+        title = result.get("title", "page")[:40]
+        return f"Scraped '{title}' ({chars:,} chars, {imgs} images)"
+    if name == "search_web":
+        if not result.get("has_answer") or not result.get("results"):
+            return "No web results found"
+        count = result.get("source_count", 0)
+        sources = result.get("sources", [])
+        label = f"{count} sources" if count else "web summary"
+        snippet = (sources[0][:60] + "…") if sources else ""
+        return f"Found {label}" + (f" — {snippet}" if snippet else "")
+    if name == "retrieve_similar_posts":
+        n = result.get("count", 0)
+        return f"Retrieved {n} similar posts for style reference"
+    return "Tool completed"
