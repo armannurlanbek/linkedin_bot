@@ -1,7 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException, Response
+import mimetypes
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
+import httpx
 
 from app.db import get_db, Chat, Message
 from app.services.agent import run_agent
@@ -61,6 +64,68 @@ def delete_chat(chat_id: int, db: Session = Depends(get_db)):
     db.delete(chat)
     db.commit()
     return Response(status_code=204)
+
+
+@router.delete("/chats/{chat_id}/messages/since/{message_id}", status_code=204)
+def truncate_messages(chat_id: int, message_id: int, db: Session = Depends(get_db)):
+    """Delete message_id and all subsequent messages in the chat (for edit-and-resend)."""
+    msg = db.query(Message).filter(Message.id == message_id, Message.chat_id == chat_id).first()
+    if not msg:
+        raise HTTPException(404, "Message not found")
+    (
+        db.query(Message)
+        .filter(Message.chat_id == chat_id, Message.id >= message_id)
+        .delete(synchronize_session=False)
+    )
+    db.commit()
+    return Response(status_code=204)
+
+
+@router.get("/proxy-image")
+def proxy_image(url: str = Query(...), download: bool = False):
+    """Proxy a remote image. download=false → view in browser, download=true → save file."""
+    if not url.startswith("http"):
+        raise HTTPException(400, "Invalid URL")
+    try:
+        req_headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Referer": url,
+        }
+        with httpx.Client(timeout=15, follow_redirects=True) as client:
+            resp = client.get(url, headers=req_headers)
+        if not resp.is_success:
+            raise HTTPException(502, "Remote image not available")
+        raw_ct = resp.headers.get("content-type", "").split(";")[0].strip()
+        data = resp.content
+
+        # Detect image type from magic bytes — content-type headers from CDNs are unreliable
+        if data[:3] == b'\xff\xd8\xff':
+            content_type, ext = "image/jpeg", ".jpg"
+        elif data[:4] == b'\x89PNG':
+            content_type, ext = "image/png", ".png"
+        elif data[:6] in (b'GIF87a', b'GIF89a'):
+            content_type, ext = "image/gif", ".gif"
+        elif data[:4] == b'RIFF' and data[8:12] == b'WEBP':
+            content_type, ext = "image/webp", ".webp"
+        elif raw_ct.startswith("image/"):
+            content_type = raw_ct
+            ext = mimetypes.guess_extension(content_type) or ".jpg"
+            if ext == ".jpe":
+                ext = ".jpg"
+        else:
+            raise HTTPException(502, "Remote resource is not an image")
+
+        filename = url.split("/")[-1].split("?")[0] or ""
+        if not any(filename.lower().endswith(e) for e in (".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif")):
+            filename = (filename.rsplit(".", 1)[0] if "." in filename else filename or "image") + ext
+        resp_headers = {}
+        if download:
+            resp_headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+        return Response(content=data, media_type=content_type, headers=resp_headers)
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(502, "Failed to proxy image")
 
 
 @router.post("/chats/{chat_id}/messages")

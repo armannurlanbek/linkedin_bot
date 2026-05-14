@@ -139,9 +139,52 @@
       opacity: 0; transition: opacity 0.2s;
       font-size: 18px; color: white;
     }
+
+    /* ── Edit mode indicator ──────────────────────────────────── */
+    #input-area.editing-mode {
+      border-color: #f59e0b;
+      box-shadow: 0 0 0 2px rgba(245,158,11,0.25);
+    }
+
+    /* ── Lightbox ─────────────────────────────────────────────── */
+    #lightbox {
+      display: none;
+      position: fixed; inset: 0; z-index: 9999;
+      background: rgba(0,0,0,0.88);
+      align-items: center; justify-content: center;
+    }
+    #lightbox.open { display: flex; }
+    #lightbox img {
+      max-width: 92vw; max-height: 88vh;
+      object-fit: contain;
+      border-radius: 8px;
+      box-shadow: 0 8px 48px rgba(0,0,0,0.6);
+    }
+    #lightbox-close {
+      position: absolute; top: 16px; right: 20px;
+      font-size: 28px; color: #fff; cursor: pointer;
+      line-height: 1; background: none; border: none;
+      opacity: 0.8; transition: opacity 0.15s;
+    }
+    #lightbox-close:hover { opacity: 1; }
+    #lightbox-dl {
+      position: absolute; bottom: 20px; right: 20px;
+      font-size: 13px; color: #e2e8f0; text-decoration: underline;
+      cursor: pointer; background: none; border: none;
+    }
+    #lightbox-dl:hover { color: #fff; }
   </style>
 </head>
 <body class="flex h-screen overflow-hidden bg-slate-100 text-slate-800 antialiased">
+
+  <!-- ══════════════════════════════════════════════════════════════
+       LIGHTBOX
+  ══════════════════════════════════════════════════════════════ -->
+  <div id="lightbox" role="dialog" aria-modal="true">
+    <button id="lightbox-close" aria-label="Close">✕</button>
+    <img id="lightbox-img" src="" alt="Full size image" />
+    <a id="lightbox-dl" href="#" download>⬇ Download</a>
+  </div>
 
   <!-- ══════════════════════════════════════════════════════════════
        SIDEBAR
@@ -230,15 +273,18 @@
     const sendBtn      = document.getElementById('send-btn');
 
     // ── App state ───────────────────────────────────────────────
-    let activeChatId    = null;
-    let streamingChatId = null; // which chat is currently streaming
-    const chatPanels    = {};   // chatId → panel DOM element
+    let activeChatId         = null;
+    let streamingChatId      = null;
+    let abortController      = null;
+    let editingFromMessageId = null;
+    const chatPanels         = {};
 
     // ── Tool metadata ────────────────────────────────────────────
     const TOOL_EMOJI = {
-      scrape_url:            '🔍',
-      search_web:            '🌐',
-      retrieve_similar_posts:'📚',
+      scrape_url:             '🔍',
+      search_web:             '🌐',
+      retrieve_similar_posts: '📚',
+      search_images:          '🖼️',
     };
     function toolEmoji(name) { return TOOL_EMOJI[name] || '⚙️'; }
 
@@ -346,13 +392,14 @@
     // RENDERING HELPERS
     // ════════════════════════════════════════════════════════════
 
-    function appendUserMessage(text, panel) {
+    function appendUserMessage(text, panel, messageId = null) {
       const target = panel || getOrCreatePanel(activeChatId);
       emptyState.style.display = 'none';
       target.style.display = '';
 
       const wrap = document.createElement('div');
-      wrap.className = 'flex justify-end';
+      wrap.className = 'flex flex-col items-end gap-1';
+      if (messageId) wrap.dataset.messageId = String(messageId);
 
       const bubble = document.createElement('div');
       bubble.className = 'user-bubble max-w-lg text-white text-sm px-4 py-2.5 rounded-2xl rounded-br-sm whitespace-pre-wrap shadow-sm';
@@ -360,6 +407,18 @@
       bubble.textContent = text;
 
       wrap.appendChild(bubble);
+
+      if (messageId) {
+        const editBtn = document.createElement('button');
+        editBtn.className = 'text-xs text-slate-400 hover:text-amber-500 transition';
+        editBtn.style.cssText = 'opacity:0;font-size:11px';
+        editBtn.textContent = '✏️ Edit & resend';
+        editBtn.addEventListener('click', () => editMessage(text, messageId));
+        wrap.addEventListener('mouseenter', () => { editBtn.style.opacity = '1'; });
+        wrap.addEventListener('mouseleave', () => { editBtn.style.opacity = '0'; });
+        wrap.appendChild(editBtn);
+      }
+
       target.appendChild(wrap);
       scrollToBottom(true);
       return wrap;
@@ -372,6 +431,30 @@
         .replace(/>/g, '&gt;');
       return escaped.replace(/\*\*(.+?)\*\*/gs, '<strong>$1</strong>');
     }
+
+    // ════════════════════════════════════════════════════════════
+    // LIGHTBOX
+    // ════════════════════════════════════════════════════════════
+
+    const lightbox    = document.getElementById('lightbox');
+    const lightboxImg = document.getElementById('lightbox-img');
+    const lightboxDl  = document.getElementById('lightbox-dl');
+
+    function openLightbox(proxyView, proxyDl) {
+      lightboxImg.src = proxyView;
+      lightboxDl.href = proxyDl;
+      lightbox.classList.add('open');
+      document.body.style.overflow = 'hidden';
+    }
+    function closeLightbox() {
+      lightbox.classList.remove('open');
+      lightboxImg.src = '';
+      document.body.style.overflow = '';
+    }
+
+    document.getElementById('lightbox-close').addEventListener('click', closeLightbox);
+    lightbox.addEventListener('click', e => { if (e.target === lightbox) closeLightbox(); });
+    document.addEventListener('keydown', e => { if (e.key === 'Escape') closeLightbox(); });
 
     // ════════════════════════════════════════════════════════════
     // IMAGE GRID
@@ -388,29 +471,52 @@
         ? 'w-full'
         : 'w-full grid grid-cols-2 gap-2';
 
-      function makeThumb(src) {
-        const wrap = document.createElement('div');
-        wrap.className = 'img-thumb-wrap min-w-0';
+      function makeThumb(src, eager = false) {
+        const proxyView = `/api/proxy-image?url=${encodeURIComponent(src)}`;
+        const proxyDl   = `/api/proxy-image?url=${encodeURIComponent(src)}&download=true`;
 
-        const a = document.createElement('a');
-        a.href = src; a.target = '_blank'; a.rel = 'noopener noreferrer';
+        const outer = document.createElement('div');
+        outer.className = 'min-w-0 flex flex-col gap-1';
+
+        const imgWrap = document.createElement('div');
+        imgWrap.className = 'img-thumb-wrap cursor-pointer';
 
         const img = document.createElement('img');
-        img.src = src;
-        img.loading = 'lazy';
+        // Load via proxy directly — avoids hotlink protection entirely
+        img.src = proxyView;
+        img.loading = eager ? 'eager' : 'lazy';
         img.className = single
-          ? 'w-full max-h-64 rounded-lg object-cover border border-slate-200'
-          : 'w-full h-40 object-cover border border-slate-200';
-        img.onerror = () => wrap.remove();
+          ? 'w-full max-h-72 rounded-lg object-cover border border-slate-200'
+          : 'w-full h-48 object-cover border border-slate-200';
+        img.onerror = () => {
+          img.style.cssText = 'background:#f1f5f9;opacity:0.3;width:100%;height:100%';
+        };
 
         const overlay = document.createElement('div');
         overlay.className = 'img-overlay';
-        overlay.textContent = '↗';
+        overlay.textContent = '⤢';
 
-        a.appendChild(img);
-        wrap.appendChild(a);
-        wrap.appendChild(overlay);
-        return wrap;
+        // Click thumbnail → open lightbox
+        imgWrap.addEventListener('click', () => openLightbox(proxyView, proxyDl));
+
+        imgWrap.appendChild(img);
+        imgWrap.appendChild(overlay);
+        outer.appendChild(imgWrap);
+
+        // Download link below thumbnail
+        const actions = document.createElement('div');
+        actions.className = 'flex gap-3 px-0.5';
+
+        const dlLink = document.createElement('a');
+        dlLink.href = proxyDl;
+        dlLink.className = 'text-xs text-slate-400 hover:text-indigo-500 transition';
+        dlLink.textContent = '⬇ Download';
+        dlLink.addEventListener('click', e => e.stopPropagation());
+
+        actions.appendChild(dlLink);
+        outer.appendChild(actions);
+
+        return outer;
       }
 
       shown.forEach(src => grid.appendChild(makeThumb(src)));
@@ -420,7 +526,8 @@
         moreBtn.className = 'col-span-2 text-xs text-indigo-600 hover:text-indigo-800 font-medium py-1 transition';
         moreBtn.textContent = `+${extra.length} more images`;
         moreBtn.addEventListener('click', () => {
-          extra.forEach(src => grid.insertBefore(makeThumb(src), moreBtn));
+          // eager=true so images load immediately when inserted
+          extra.forEach(src => grid.insertBefore(makeThumb(src, true), moreBtn));
           moreBtn.remove();
         });
         grid.appendChild(moreBtn);
@@ -439,7 +546,7 @@
       target.style.display = '';
 
       const wrap = document.createElement('div');
-      wrap.className = 'flex flex-col gap-3 max-w-2xl';
+      wrap.className = 'flex flex-col gap-3 max-w-3xl';
 
       // ── Thinking section ──────────────────────────────────────
       const thinkingSection = document.createElement('div');
@@ -638,6 +745,13 @@
           }
         },
 
+        addImages(images) {
+          if (!images || images.length === 0) return;
+          const grid = buildImageGrid(images);
+          imagesSection.appendChild(grid);
+          imagesSection.classList.remove('hidden');
+        },
+
         movePendingToNotes() {
           if (!postText.trim()) return;
           const note = document.createElement('div');
@@ -824,6 +938,11 @@
       const key = String(chatId);
       activeChatId = key;
       setActiveSidebarItem(key);
+      updateSendStopButton();
+
+      // Cancel any active edit mode when switching chats
+      editingFromMessageId = null;
+      inputArea.classList.remove('editing-mode');
 
       // If we have a cached panel (e.g. streaming in background), just show it
       if (chatPanels[key]) {
@@ -844,22 +963,31 @@
 
         const panel = getOrCreatePanel(key);
 
+        let lastShell = null;
         for (const msg of chat.messages) {
           if (msg.role === 'user') {
             const content = msg.content;
             if (Array.isArray(content)) {
               const text = content.filter(b => b.type === 'text').map(b => b.text).join('\n');
-              if (text) appendUserMessage(text, panel);
+              if (text) appendUserMessage(text, panel, msg.id);
+              // Restore images stored in tool_results
+              if (lastShell) {
+                content.forEach(b => {
+                  if (b.type === 'tool_result' && Array.isArray(b.__images__) && b.__images__.length > 0) {
+                    lastShell.addImages(b.__images__);
+                  }
+                });
+              }
             } else {
-              appendUserMessage(content || msg.text || '', panel);
+              appendUserMessage(content || msg.text || '', panel, msg.id);
             }
           } else if (msg.role === 'assistant') {
-            const shell = createAssistantMessageShell(panel);
+            lastShell = createAssistantMessageShell(panel);
             const content = msg.content;
             if (Array.isArray(content)) {
-              shell.renderHistory(content);
+              lastShell.renderHistory(content);
             } else if (typeof content === 'string') {
-              shell.renderHistory([{ type: 'text', text: content }]);
+              lastShell.renderHistory([{ type: 'text', text: content }]);
             }
           }
         }
@@ -915,14 +1043,50 @@
     // SEND MESSAGE + SSE STREAMING
     // ════════════════════════════════════════════════════════════
 
-    function updateSendButton() {
-      // Disable send only if this chat is the one streaming
-      sendBtn.disabled = streamingChatId === activeChatId;
+    const BTN_BASE = 'shrink-0 flex items-center gap-1.5 text-white text-sm font-medium rounded-xl px-4 py-2.5 transition';
+    function updateSendStopButton() {
+      const isStreamingHere = streamingChatId !== null && streamingChatId === activeChatId;
+      if (isStreamingHere) {
+        sendBtn.className = `${BTN_BASE} bg-red-600 hover:bg-red-500 active:bg-red-700`;
+        sendBtn.innerHTML = '<span>Stop</span><span class="text-base leading-none">■</span>';
+      } else {
+        sendBtn.className = `${BTN_BASE} bg-indigo-600 hover:bg-indigo-500 active:bg-indigo-700`;
+        sendBtn.innerHTML = '<span>Send</span><span class="text-base leading-none">↩</span>';
+      }
+    }
+
+    function editMessage(text, messageId) {
+      if (streamingChatId) return;
+      inputArea.value = text;
+      inputArea.style.height = 'auto';
+      inputArea.style.height = Math.min(inputArea.scrollHeight, 96) + 'px';
+      editingFromMessageId = messageId;
+      inputArea.classList.add('editing-mode');
+      inputArea.focus();
     }
 
     async function sendMessage() {
       const text = inputArea.value.trim();
       if (!text || streamingChatId === activeChatId) return;
+
+      // Edit-and-resend: truncate DB + remove DOM from that message onward
+      if (editingFromMessageId && activeChatId) {
+        inputArea.classList.remove('editing-mode');
+        try {
+          await apiDelete(`/api/chats/${activeChatId}/messages/since/${editingFromMessageId}`);
+          const panel = chatPanels[String(activeChatId)];
+          if (panel) {
+            let removing = false;
+            [...panel.children].forEach(child => {
+              if (!removing && child.dataset?.messageId === String(editingFromMessageId)) removing = true;
+              if (removing) child.remove();
+            });
+          }
+        } catch (e) {
+          console.error('Failed to truncate messages for edit', e);
+        }
+        editingFromMessageId = null;
+      }
 
       if (!activeChatId) {
         try {
@@ -942,8 +1106,9 @@
       inputArea.value = '';
       inputArea.style.height = '';
 
+      abortController = new AbortController();
       streamingChatId = thisChatId;
-      updateSendButton();
+      updateSendStopButton();
       inputArea.disabled = true;
 
       const shell = createAssistantMessageShell(panel);
@@ -953,6 +1118,7 @@
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ text }),
+          signal: abortController.signal,
         });
 
         if (!resp.ok) {
@@ -960,7 +1126,8 @@
           try { const j = await resp.json(); if (j.detail) detail = j.detail; } catch {}
           shell.showError(detail);
           streamingChatId = null;
-          updateSendButton();
+          abortController = null;
+          updateSendStopButton();
           inputArea.disabled = false;
           return;
         }
@@ -985,10 +1152,15 @@
         }
 
       } catch (e) {
-        shell.showError(e.message || 'Network error');
+        if (e.name === 'AbortError') {
+          shell.finalize();
+        } else {
+          shell.showError(e.message || 'Network error');
+        }
       } finally {
         streamingChatId = null;
-        updateSendButton();
+        abortController = null;
+        updateSendStopButton();
         inputArea.disabled = false;
         if (activeChatId === thisChatId) inputArea.focus();
       }
@@ -1033,7 +1205,13 @@
     // INPUT EVENT WIRING
     // ════════════════════════════════════════════════════════════
 
-    sendBtn.addEventListener('click', sendMessage);
+    sendBtn.addEventListener('click', () => {
+      if (streamingChatId !== null && streamingChatId === activeChatId && abortController) {
+        abortController.abort();
+      } else {
+        sendMessage();
+      }
+    });
 
     inputArea.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !e.shiftKey) {

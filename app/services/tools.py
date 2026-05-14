@@ -16,10 +16,15 @@ TOOLS = [
     },
     {
         "name": "search_web",
-        "description": "Search the web for project details: developer, main contractor, architect, facade contractor. Use the building name as the query.",
+        "description": (
+            "Search the web for project credits: developer (יזם), main contractor (קבלן ראשי), "
+            "architect (אדריכל), and facade/envelope contractor (קבלן מעטפת). "
+            "Search twice if needed — once in Hebrew, once in English — to maximise chances of finding exact names. "
+            "Only use names that appear explicitly in search results. Never invent or guess names."
+        ),
         "input_schema": {
             "type": "object",
-            "properties": {"query": {"type": "string", "description": "Search query"}},
+            "properties": {"query": {"type": "string", "description": "Search query, e.g. 'Tower Name City developer contractor architect facade'"}},
             "required": ["query"]
         }
     },
@@ -34,7 +39,16 @@ TOOLS = [
             },
             "required": ["query"]
         }
-    }
+    },
+    {
+        "name": "search_images",
+        "description": "Search the internet for high-quality photos of this specific building or architectural project. Use when the user asks for images, or to find building exterior/facade photos to supplement the article.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"query": {"type": "string", "description": "Building name + city + 'facade exterior architecture' (e.g. 'Azrieli Tower Tel Aviv glass facade exterior')"}},
+            "required": ["query"]
+        }
+    },
 ]
 
 
@@ -60,6 +74,10 @@ def execute_tool(name: str, args: dict, db) -> dict:
             + "\n\n---\n\n".join(sections)
         )
         return {"style_examples": formatted, "count": len(results)}
+    if name == "search_images":
+        from app.services.search import search_images
+        images = search_images(args["query"])
+        return {"images": images, "count": len(images)}
     return {"error": f"Unknown tool: {name}"}
 
 
@@ -80,4 +98,7 @@ def summarize_result(name: str, result: dict) -> str:
     if name == "retrieve_similar_posts":
         n = result.get("count", 0)
         return f"Retrieved {n} similar posts for style reference"
+    if name == "search_images":
+        n = result.get("count", 0)
+        return f"Found {n} building photos"
     return "Tool completed"
