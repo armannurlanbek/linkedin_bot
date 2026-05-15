@@ -32,7 +32,7 @@ def create_chat(body: ChatCreate = ChatCreate(), db: Session = Depends(get_db)):
 @router.get("/chats")
 def list_chats(db: Session = Depends(get_db)):
     chats = db.query(Chat).order_by(Chat.updated_at.desc()).all()
-    return [{"id": c.id, "title": c.title, "updated_at": c.updated_at} for c in chats]
+    return [{"id": c.id, "title": c.title, "thumbnail_url": c.thumbnail_url, "updated_at": c.updated_at} for c in chats]
 
 
 @router.get("/chats/{chat_id}")
@@ -107,13 +107,17 @@ def proxy_image(url: str = Query(...), download: bool = False):
             content_type, ext = "image/gif", ".gif"
         elif data[:4] == b'RIFF' and data[8:12] == b'WEBP':
             content_type, ext = "image/webp", ".webp"
+        elif len(data) >= 12 and data[4:8] == b'ftyp' and b'avif' in data[8:16].lower():
+            content_type, ext = "image/avif", ".avif"
+        elif raw_ct == "image/svg+xml":
+            content_type, ext = "image/svg+xml", ".svg"
         elif raw_ct.startswith("image/"):
             content_type = raw_ct
             ext = mimetypes.guess_extension(content_type) or ".jpg"
             if ext == ".jpe":
                 ext = ".jpg"
         else:
-            raise HTTPException(502, "Remote resource is not an image")
+            raise HTTPException(404, "Not an image")
 
         filename = url.split("/")[-1].split("?")[0] or ""
         if not any(filename.lower().endswith(e) for e in (".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif")):

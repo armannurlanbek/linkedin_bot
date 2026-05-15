@@ -47,7 +47,8 @@ TOOLS = [
             "type": "object",
             "properties": {"query": {"type": "string", "description": "Building name + city + 'facade exterior architecture' (e.g. 'Azrieli Tower Tel Aviv glass facade exterior')"}},
             "required": ["query"]
-        }
+        },
+        "cache_control": {"type": "ephemeral"},
     },
 ]
 

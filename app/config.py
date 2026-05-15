@@ -7,6 +7,9 @@ class Settings(BaseSettings):
     database_url: str
     database_url_sync: str
     tavily_api_key: str = ""
+    app_password: str = ""
+    cookie_secret: str = "change-me-in-production"
+    cookie_secure: bool = False
 
     class Config:
         env_file = ".env"

@@ -35,7 +35,8 @@ def _sse(event: dict) -> str:
     return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
 
-def _build_system() -> str:
+def _build_system() -> list:
+    """Return a list of system content blocks with cache_control on the large static block."""
     style_card    = _load_style_card()
     examples_text = _load_example_posts()
 
@@ -52,7 +53,7 @@ def _build_system() -> str:
 ════════════════════════════════════════
 """
 
-    return f"""אתה כותב פוסטים ללינקדאין עבור רומן מינייב, מנכ"ל Orlanda — חברה ישראלית למעטפת בניין.
+    static_block = f"""אתה כותב פוסטים ללינקדאין עבור רומן מינייב, מנכ"ל Orlanda — חברה ישראלית למעטפת בניין.
 המשימה: לכתוב פוסט שנשמע בדיוק כמו רומן — לא כמו AI, לא כמו עיתונאי, כמו רומן.
 {examples_section}
 כרטיס הסגנון (מאפיינים שנחלצו מ-300 פוסטים):
@@ -121,11 +122,23 @@ def _build_system() -> str:
 - URL נוסף → חזור על שלבים 1-5 מהתחלה
 - אסור לקרוא לכלים אחרי שהתחלת לכתוב את הפוסט"""
 
+    return [
+        {
+            "type": "text",
+            "text": static_block,
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
+
 
 def _save_message(db: Session, chat_id: int, role: str, content: list) -> None:
-    msg = Message(chat_id=chat_id, role=role, content=content)
-    db.add(msg)
-    db.commit()
+    try:
+        msg = Message(chat_id=chat_id, role=role, content=content)
+        db.add(msg)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
 
 
 def _sanitize_block(block: dict) -> dict:
@@ -154,6 +167,68 @@ def _sanitize_block(block: dict) -> dict:
     return block
 
 
+def _repair_tool_pairs(history: list) -> list:
+    """Ensure every tool_use block has a matching tool_result in the next message.
+
+    If the tool_result message was never saved (e.g. due to a DB error), the API
+    rejects the history with a 400.  We inject synthetic tool_results so the
+    conversation can continue cleanly.
+    """
+    def _block_type(b):
+        return b.get("type") if isinstance(b, dict) else getattr(b, "type", None)
+
+    def _block_id(b):
+        return b.get("id") if isinstance(b, dict) else getattr(b, "id", None)
+
+    def _block_tool_use_id(b):
+        return b.get("tool_use_id") if isinstance(b, dict) else getattr(b, "tool_use_id", None)
+
+    out = []
+    i = 0
+    while i < len(history):
+        msg = history[i]
+        if msg["role"] == "assistant":
+            content = msg["content"] if isinstance(msg["content"], list) else []
+            tool_use_ids = [_block_id(b) for b in content if _block_type(b) == "tool_use" and _block_id(b)]
+
+            if tool_use_ids:
+                out.append(msg)
+                next_msg = history[i + 1] if i + 1 < len(history) else None
+
+                if next_msg and next_msg["role"] == "user":
+                    next_content = next_msg["content"] if isinstance(next_msg["content"], list) else []
+                    covered = {_block_tool_use_id(b) for b in next_content if _block_type(b) == "tool_result"}
+                    missing = [id for id in tool_use_ids if id not in covered]
+                    if missing:
+                        # Inject synthetic results for the missing ones
+                        patched = [
+                            {"type": "tool_result", "tool_use_id": id, "content": "(interrupted)"}
+                            for id in missing
+                        ] + list(next_content)
+                        out.append({"role": "user", "content": patched})
+                        i += 2
+                        continue
+                    # next_msg already has all tool_results — append it and advance
+                    out.append(next_msg)
+                    i += 2
+                    continue
+                else:
+                    # No following user message at all — synthesize one entirely
+                    out.append({
+                        "role": "user",
+                        "content": [
+                            {"type": "tool_result", "tool_use_id": id, "content": "(interrupted)"}
+                            for id in tool_use_ids
+                        ],
+                    })
+                    i += 1
+                    continue
+
+        out.append(msg)
+        i += 1
+    return out
+
+
 def _load_history(db: Session, chat_id: int) -> list:
     messages = (
         db.query(Message)
@@ -170,7 +245,7 @@ def _load_history(db: Session, chat_id: int) -> list:
                 for b in content
             ]
         result.append({"role": m.role, "content": content})
-    return result
+    return _repair_tool_pairs(result)
 
 
 def _generate_title(user_text: str) -> str:
@@ -215,7 +290,11 @@ def run_agent(chat_id: int, user_text: str, db: Session):
 
         # Build message history for Claude
         history = _load_history(db, chat_id)
-        system = _build_system()
+        system = _build_system()  # list of blocks with cache_control
+
+        # Track yielded images to avoid duplicates across tool calls
+        seen_images: set[str] = set()
+        thumbnail_saved = False
 
         # Tool-use loop (max 8 iterations)
         for _ in range(8):
@@ -247,7 +326,10 @@ def run_agent(chat_id: int, user_text: str, db: Session):
                 else:
                     content_blocks.append(dict(block))
 
-            _save_message(db, chat_id, "assistant", content_blocks)
+            try:
+                _save_message(db, chat_id, "assistant", content_blocks)
+            except Exception:
+                pass  # Don't let a DB write failure abort the stream
             history.append({"role": "assistant", "content": final.content})
 
             if final.stop_reason == "end_turn":
@@ -273,7 +355,17 @@ def run_agent(chat_id: int, user_text: str, db: Session):
                     preview = summarize_result(block.name, result)
                     images = []
                     if block.name in ("scrape_url", "search_images") and isinstance(result.get("images"), list):
-                        images = [u for u in result["images"] if isinstance(u, str) and u.startswith("http")][:12]
+                        raw = [u for u in result["images"] if isinstance(u, str) and u.startswith("http")][:12]
+                        images = [u for u in raw if u not in seen_images]
+                        seen_images.update(images)
+                    if images and not thumbnail_saved:
+                        try:
+                            db.query(Chat).filter(Chat.id == chat_id).update({"thumbnail_url": images[0]})
+                            db.commit()
+                            thumbnail_saved = True
+                            yield _sse({"type": "thumbnail", "url": images[0]})
+                        except Exception:
+                            db.rollback()
                     yield _sse({"type": "tool_result", "id": block.id, "preview": preview, "images": images})
                     tool_results.append(
                         {
@@ -288,7 +380,10 @@ def run_agent(chat_id: int, user_text: str, db: Session):
                 yield _sse({"type": "done"})
                 return
 
-            _save_message(db, chat_id, "user", tool_results)
+            try:
+                _save_message(db, chat_id, "user", tool_results)
+            except Exception:
+                pass
             history.append({"role": "user", "content": [_sanitize_block(r) for r in tool_results]})
 
         yield _sse({"type": "done"})

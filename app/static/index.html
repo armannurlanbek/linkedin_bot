@@ -2,8 +2,11 @@
 <html lang="he">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>LinkedIn Bot</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <title>Roman's Agent</title>
+  <link rel="icon" type="image/png" href="/static/orlanda-logo.png" />
 
   <!-- Google Fonts -->
   <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -22,6 +25,8 @@
     .hebrew-text {
       font-family: 'Heebo', "Arial Hebrew", Arial, sans-serif;
       white-space: pre-wrap;
+      word-break: break-word;
+      overflow-wrap: anywhere;
       direction: rtl;
       text-align: right;
       line-height: 1.85;
@@ -49,6 +54,23 @@
     .chat-item.active { background: rgba(99,102,241,0.15); border-left-color: #818cf8; color: #fff; }
     .chat-item:hover .delete-btn { opacity: 1; }
     .delete-btn { opacity: 0; transition: opacity 0.15s; }
+    .chat-thumb-wrap {
+      width: 44px; height: 44px; flex-shrink: 0;
+      border-radius: 8px; overflow: hidden;
+      background: #1e293b;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .chat-thumb-wrap img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .chat-thumb-placeholder { font-size: 20px; line-height: 1; }
+    .chat-streaming-dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: #818cf8; flex-shrink: 0;
+      animation: pulse-dot 1.2s ease-in-out infinite;
+    }
+    @keyframes pulse-dot {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50%       { opacity: 0.4; transform: scale(0.75); }
+    }
 
     /* ── Message panel scrollbar ──────────────────────────────── */
     #messages::-webkit-scrollbar { width: 5px; }
@@ -146,6 +168,73 @@
       box-shadow: 0 0 0 2px rgba(245,158,11,0.25);
     }
 
+    /* ── Mobile full-height fix (iOS Safari URL bar) ──────────── */
+    html, body { height: 100dvh; max-height: 100dvh; }
+    body { overflow: hidden; }
+
+    /* ── Mobile sidebar drawer ────────────────────────────────── */
+    @media (max-width: 767px) {
+      #sidebar {
+        position: fixed; top: 0; left: 0; bottom: 0;
+        z-index: 200;
+        transform: translateX(-100%);
+        transition: transform 0.25s ease;
+        width: 280px !important;
+      }
+      #sidebar.open { transform: translateX(0); }
+      #sidebar-backdrop {
+        display: none;
+        position: fixed; inset: 0; z-index: 199;
+        background: rgba(0,0,0,0.5);
+      }
+      #sidebar-backdrop.open { display: block; }
+      #menu-toggle { display: flex !important; }
+      #main-header { display: flex; }
+      /* Bigger touch targets on mobile */
+      #send-btn { min-height: 44px; }
+      #input-area { min-height: 44px; }
+    }
+    @media (min-width: 768px) {
+      #menu-toggle { display: none !important; }
+      #main-header { display: none; }
+    }
+
+    /* ── Sidebar tab toggle ───────────────────────────────────── */
+    .sidebar-tab {
+      flex: 1; padding: 6px 10px; border-radius: 8px;
+      font-size: 12px; font-weight: 500; text-align: center;
+      cursor: pointer; transition: background 0.15s, color 0.15s;
+      color: #94a3b8; background: transparent; border: none;
+    }
+    .sidebar-tab.active { background: #1e293b; color: #fff; }
+
+    /* ── Library item card ────────────────────────────────────── */
+    .library-item {
+      border-left: 2px solid transparent;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    .library-item:hover { background: rgba(255,255,255,0.06); border-left-color: #6366f1; }
+    .lib-status-badge {
+      display: inline-block; font-size: 10px; font-weight: 600;
+      padding: 1px 6px; border-radius: 10px; text-transform: uppercase; letter-spacing: 0.04em;
+    }
+    .lib-status-badge.draft { background: #1e3a5f; color: #7dd3fc; }
+    .lib-status-badge.posted { background: #14532d; color: #86efac; }
+    .lib-status-badge.promoted { background: #3b1f6b; color: #c4b5fd; }
+
+    /* ── Auth modal ───────────────────────────────────────────── */
+    #auth-modal {
+      display: none;
+      position: fixed; inset: 0; z-index: 9998;
+      background: rgba(0,0,0,0.7);
+      align-items: center; justify-content: center;
+    }
+    #auth-modal.open { display: flex; }
+    #auth-box {
+      background: #fff; border-radius: 16px; padding: 32px;
+      width: min(380px, 92vw); box-shadow: 0 20px 60px rgba(0,0,0,0.4);
+    }
+
     /* ── Lightbox ─────────────────────────────────────────────── */
     #lightbox {
       display: none;
@@ -178,6 +267,32 @@
 <body class="flex h-screen overflow-hidden bg-slate-100 text-slate-800 antialiased">
 
   <!-- ══════════════════════════════════════════════════════════════
+       AUTH MODAL
+  ══════════════════════════════════════════════════════════════ -->
+  <div id="auth-modal" role="dialog" aria-modal="true">
+    <div id="auth-box">
+      <div class="flex items-center gap-3 mb-6">
+        <div class="w-10 h-10 rounded-xl overflow-hidden flex items-center justify-center bg-indigo-600"><img src="/static/orlanda-logo.png" alt="Orlanda" class="w-full h-full object-contain p-1" /></div>
+        <div>
+          <h2 class="font-semibold text-slate-800 text-base">Roman's Agent</h2>
+          <p class="text-xs text-slate-400">Enter password to continue</p>
+        </div>
+      </div>
+      <input
+        id="auth-input"
+        type="password"
+        placeholder="Password"
+        class="w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-400 mb-3"
+      />
+      <div id="auth-error" class="hidden text-xs text-red-500 mb-3"></div>
+      <button
+        id="auth-submit"
+        class="w-full bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-xl px-4 py-3 transition"
+      >Sign in</button>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════════════
        LIGHTBOX
   ══════════════════════════════════════════════════════════════ -->
   <div id="lightbox" role="dialog" aria-modal="true">
@@ -185,6 +300,9 @@
     <img id="lightbox-img" src="" alt="Full size image" />
     <a id="lightbox-dl" href="#" download>⬇ Download</a>
   </div>
+
+  <!-- Mobile sidebar backdrop -->
+  <div id="sidebar-backdrop"></div>
 
   <!-- ══════════════════════════════════════════════════════════════
        SIDEBAR
@@ -194,16 +312,22 @@
     <!-- Brand -->
     <div class="px-5 pt-5 pb-4 border-b border-white/10">
       <div class="flex items-center gap-2.5">
-        <div class="w-8 h-8 rounded-lg bg-indigo-600 flex items-center justify-center text-base shrink-0">🏢</div>
+        <div class="w-8 h-8 rounded-lg overflow-hidden shrink-0 flex items-center justify-center bg-transparent"><img src="/static/orlanda-logo.png" alt="Orlanda" class="w-full h-full object-contain" /></div>
         <div>
-          <h1 class="text-sm font-semibold tracking-tight text-white">LinkedIn Bot</h1>
+          <h1 class="text-sm font-semibold tracking-tight text-white">Roman's Agent</h1>
           <p class="text-[11px] text-slate-400 mt-0">Hebrew post generator</p>
         </div>
       </div>
     </div>
 
-    <!-- New chat button -->
-    <div class="px-4 py-3">
+    <!-- Tab toggle -->
+    <div class="px-4 pt-3 pb-1 flex gap-1 bg-[#0f172a]">
+      <button id="tab-chats" class="sidebar-tab active">💬 Chats</button>
+      <button id="tab-library" class="sidebar-tab">📚 Library</button>
+    </div>
+
+    <!-- New chat button (chats only) -->
+    <div id="new-chat-wrap" class="px-4 py-2">
       <button
         id="new-chat-btn"
         class="w-full flex items-center gap-2 px-3 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 active:bg-indigo-700 text-sm font-medium text-white transition"
@@ -213,8 +337,8 @@
       </button>
     </div>
 
-    <!-- Chat list -->
-    <div id="sidebar-list" class="flex-1 overflow-y-auto px-3 py-1 space-y-0.5">
+    <!-- Chat / Library list -->
+    <div id="sidebar-list" class="flex-1 overflow-y-auto px-2 py-2 space-y-1">
       <!-- items injected by JS -->
     </div>
   </aside>
@@ -224,8 +348,18 @@
   ══════════════════════════════════════════════════════════════ -->
   <main class="flex-1 flex flex-col min-w-0 bg-slate-50">
 
+    <!-- Mobile-only top bar with hamburger -->
+    <div id="main-header" class="items-center gap-3 px-4 py-3 border-b border-slate-200 bg-white">
+      <button id="menu-toggle" class="text-slate-600 hover:text-indigo-600 transition p-1" aria-label="Open menu">
+        <svg width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+          <line x1="3" y1="6" x2="19" y2="6"/><line x1="3" y1="12" x2="19" y2="12"/><line x1="3" y1="18" x2="19" y2="18"/>
+        </svg>
+      </button>
+      <span class="text-sm font-semibold text-slate-700">Roman's Agent</span>
+    </div>
+
     <!-- Message list -->
-    <div id="messages" class="flex-1 overflow-y-auto px-6 py-6">
+    <div id="messages" class="flex-1 overflow-y-auto px-4 py-4 md:px-6 md:py-6">
 
       <!-- Empty state -->
       <div id="empty-state" class="h-full flex flex-col items-center justify-center text-center select-none">
@@ -267,17 +401,23 @@
     // ── DOM refs ────────────────────────────────────────────────
     const sidebarList  = document.getElementById('sidebar-list');
     const newChatBtn   = document.getElementById('new-chat-btn');
+    const newChatWrap  = document.getElementById('new-chat-wrap');
     const messages     = document.getElementById('messages');
     const emptyState   = document.getElementById('empty-state');
     const inputArea    = document.getElementById('input-area');
     const sendBtn      = document.getElementById('send-btn');
+    const sidebar      = document.getElementById('sidebar');
+    const backdrop     = document.getElementById('sidebar-backdrop');
+    const menuToggle   = document.getElementById('menu-toggle');
+    const tabChats     = document.getElementById('tab-chats');
+    const tabLibrary   = document.getElementById('tab-library');
 
     // ── App state ───────────────────────────────────────────────
     let activeChatId         = null;
-    let streamingChatId      = null;
-    let abortController      = null;
+    const chatStreams         = new Map(); // chatId → AbortController
     let editingFromMessageId = null;
     const chatPanels         = {};
+    let currentTab           = 'chats'; // 'chats' | 'library'
 
     // ── Tool metadata ────────────────────────────────────────────
     const TOOL_EMOJI = {
@@ -340,22 +480,62 @@
     // SIDEBAR
     // ════════════════════════════════════════════════════════════
 
+    function _makeChatThumb(thumbnailUrl) {
+      const wrap = document.createElement('div');
+      wrap.className = 'chat-thumb-wrap';
+      if (thumbnailUrl) {
+        const img = document.createElement('img');
+        img.src = `/api/proxy-image?url=${encodeURIComponent(thumbnailUrl)}`;
+        img.alt = '';
+        img.onerror = () => {
+          img.remove();
+          const ph = document.createElement('span');
+          ph.className = 'chat-thumb-placeholder';
+          ph.textContent = '🏗';
+          wrap.appendChild(ph);
+        };
+        wrap.appendChild(img);
+      } else {
+        const ph = document.createElement('span');
+        ph.className = 'chat-thumb-placeholder';
+        ph.textContent = '🏗';
+        wrap.appendChild(ph);
+      }
+      return wrap;
+    }
+
     function renderSidebarItem(chat) {
       const existing = document.getElementById(`chat-item-${chat.id}`);
       if (existing) {
         const titleEl = existing.querySelector('.chat-title');
-        if (titleEl) titleEl.textContent = chat.title || 'Untitled';
+        if (titleEl) titleEl.textContent = chat.title || 'New Chat';
+        // Apply thumbnail if it just became available
+        if (chat.thumbnail_url) {
+          const wrap = existing.querySelector('.chat-thumb-wrap');
+          if (wrap && !wrap.querySelector('img')) {
+            wrap.innerHTML = '';
+            const img = document.createElement('img');
+            img.src = `/api/proxy-image?url=${encodeURIComponent(chat.thumbnail_url)}`;
+            img.alt = '';
+            img.onerror = () => img.remove();
+            wrap.appendChild(img);
+          }
+        }
         return existing;
       }
 
       const item = document.createElement('div');
       item.id = `chat-item-${chat.id}`;
       item.dataset.chatId = chat.id;
-      item.className = 'chat-item flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer text-sm text-slate-300 pl-3';
+      item.className = 'chat-item flex items-center gap-3 px-3 py-2.5 rounded-lg cursor-pointer text-slate-300';
+
+      item.appendChild(_makeChatThumb(chat.thumbnail_url));
 
       const title = document.createElement('span');
-      title.className = 'chat-title flex-1 truncate';
-      title.textContent = chat.title || 'Untitled';
+      title.className = 'chat-title flex-1 text-sm leading-snug line-clamp-2 text-right';
+      title.setAttribute('dir', 'rtl');
+      title.textContent = chat.title || 'New Chat';
+      item.appendChild(title);
 
       const del = document.createElement('button');
       del.className = 'delete-btn shrink-0 text-slate-500 hover:text-red-400 text-xs px-1 transition';
@@ -365,13 +545,24 @@
         e.stopPropagation();
         await deleteChat(chat.id);
       });
-
-      item.appendChild(title);
       item.appendChild(del);
-      item.addEventListener('click', () => loadChat(chat.id));
 
+      item.addEventListener('click', () => { loadChat(chat.id); closeSidebar(); });
       sidebarList.prepend(item);
       return item;
+    }
+
+    function updateSidebarThumbnail(chatId, url) {
+      const item = document.getElementById(`chat-item-${chatId}`);
+      if (!item) return;
+      const wrap = item.querySelector('.chat-thumb-wrap');
+      if (!wrap || wrap.querySelector('img')) return; // already has an image
+      wrap.innerHTML = '';
+      const img = document.createElement('img');
+      img.src = `/api/proxy-image?url=${encodeURIComponent(url)}`;
+      img.alt = '';
+      img.onerror = () => img.remove();
+      wrap.appendChild(img);
     }
 
     function setActiveSidebarItem(chatId) {
@@ -402,7 +593,8 @@
       if (messageId) wrap.dataset.messageId = String(messageId);
 
       const bubble = document.createElement('div');
-      bubble.className = 'user-bubble max-w-lg text-white text-sm px-4 py-2.5 rounded-2xl rounded-br-sm whitespace-pre-wrap shadow-sm';
+      bubble.className = 'user-bubble max-w-[80vw] md:max-w-lg text-white text-sm px-4 py-2.5 rounded-2xl rounded-br-sm shadow-sm';
+      bubble.style.cssText = "white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere";
       bubble.style.fontFamily = "'Heebo', sans-serif";
       bubble.textContent = text;
 
@@ -469,7 +661,7 @@
       const single = shown.length === 1;
       grid.className = single
         ? 'w-full'
-        : 'w-full grid grid-cols-2 gap-2';
+        : 'w-full grid grid-cols-1 sm:grid-cols-2 gap-2';
 
       function makeThumb(src, eager = false) {
         const proxyView = `/api/proxy-image?url=${encodeURIComponent(src)}`;
@@ -488,9 +680,7 @@
         img.className = single
           ? 'w-full max-h-72 rounded-lg object-cover border border-slate-200'
           : 'w-full h-48 object-cover border border-slate-200';
-        img.onerror = () => {
-          img.style.cssText = 'background:#f1f5f9;opacity:0.3;width:100%;height:100%';
-        };
+        img.onerror = () => outer.remove();
 
         const overlay = document.createElement('div');
         overlay.className = 'img-overlay';
@@ -546,7 +736,7 @@
       target.style.display = '';
 
       const wrap = document.createElement('div');
-      wrap.className = 'flex flex-col gap-3 max-w-3xl';
+      wrap.className = 'flex flex-col gap-3 max-w-3xl w-full min-w-0';
 
       // ── Thinking section ──────────────────────────────────────
       const thinkingSection = document.createElement('div');
@@ -637,11 +827,11 @@
 
       // ── Images section (outside trace, no overflow clipping) ──
       const imagesSection = document.createElement('div');
-      imagesSection.className = 'w-full hidden';
+      imagesSection.className = 'w-full overflow-hidden hidden';
 
       // ── Post card ─────────────────────────────────────────────
       const postCard = document.createElement('div');
-      postCard.className = 'bg-white rounded-xl border border-slate-200 shadow-md overflow-hidden hidden';
+      postCard.className = 'bg-white rounded-xl border border-slate-200 shadow-md overflow-hidden hidden w-full min-w-0';
 
       const postAccent = document.createElement('div');
       postAccent.className = 'post-card-accent';
@@ -679,15 +869,40 @@
         }, 2000);
       });
 
+      // ── Save button ───────────────────────────────────────────
+      const saveBtn = document.createElement('button');
+      saveBtn.className = 'hidden self-end text-xs font-medium text-slate-600 bg-white hover:bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5 transition shadow-sm';
+      saveBtn.textContent = '💾 שמור';
+      let savedMessageId = null;
+      saveBtn.addEventListener('click', async () => {
+        const text = postContent.textContent;
+        if (!text) return;
+        saveBtn.disabled = true;
+        saveBtn.textContent = '…';
+        const result = await saveToLibrary(text, activeChatId, savedMessageId);
+        if (result) {
+          saveBtn.textContent = result.already_saved ? '✓ נשמר' : '✓ נשמר';
+          saveBtn.classList.add('text-green-600', 'border-green-300');
+        } else {
+          saveBtn.textContent = '💾 שמור';
+          saveBtn.disabled = false;
+        }
+      });
+
       // ── Error display ─────────────────────────────────────────
       const errorEl = document.createElement('div');
       errorEl.className = 'hidden rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700';
+
+      const btnRow = document.createElement('div');
+      btnRow.className = 'flex items-center justify-end gap-2';
+      btnRow.appendChild(saveBtn);
+      btnRow.appendChild(copyBtn);
 
       wrap.appendChild(thinkingSection);
       wrap.appendChild(traceWrap);
       wrap.appendChild(imagesSection);
       wrap.appendChild(postCard);
-      wrap.appendChild(copyBtn);
+      wrap.appendChild(btnRow);
       wrap.appendChild(errorEl);
       target.appendChild(wrap);
       scrollToBottom();
@@ -770,13 +985,16 @@
           scrollToBottom();
         },
 
-        finalize() {
+        finalize(messageId = null) {
           const iconWrap = traceHeader.querySelector('.trace-status-icon');
           if (iconWrap) iconWrap.innerHTML = '<span class="text-green-500 font-bold text-xs">✓</span>';
           traceOpen = false;
           traceBody.classList.add('collapsed');
           traceHeader.querySelector('.trace-chevron').style.transform = 'rotate(180deg)';
-          copyBtn.classList.remove('hidden');
+          if (postContent.textContent.trim()) {
+            copyBtn.classList.remove('hidden');
+            saveBtn.classList.remove('hidden');
+          }
           scrollToBottom(true);
         },
 
@@ -874,6 +1092,9 @@
           traceHeader.querySelector('.trace-chevron').style.transform = 'rotate(180deg)';
           if (postContent.textContent.trim()) copyBtn.classList.remove('hidden');
           if (Object.keys(toolRows).length === 0) traceWrap.classList.add('hidden');
+          if (postContent.textContent.trim()) {
+            saveBtn.classList.remove('hidden');
+          }
         },
       };
     }
@@ -884,6 +1105,7 @@
 
     async function apiGet(path) {
       const r = await fetch(path);
+      if (r.status === 401) { showAuthModal(); throw new Error('Unauthorized'); }
       if (!r.ok) throw new Error(`GET ${path} → ${r.status}`);
       return r.json();
     }
@@ -894,12 +1116,25 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
+      if (r.status === 401) { showAuthModal(); throw new Error('Unauthorized'); }
       if (!r.ok) throw new Error(`POST ${path} → ${r.status}`);
+      return r.json();
+    }
+
+    async function apiPatch(path, body) {
+      const r = await fetch(path, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (r.status === 401) { showAuthModal(); throw new Error('Unauthorized'); }
+      if (!r.ok) throw new Error(`PATCH ${path} → ${r.status}`);
       return r.json();
     }
 
     async function apiDelete(path) {
       const r = await fetch(path, { method: 'DELETE' });
+      if (r.status === 401) { showAuthModal(); throw new Error('Unauthorized'); }
       if (!r.ok && r.status !== 204) throw new Error(`DELETE ${path} → ${r.status}`);
     }
 
@@ -939,6 +1174,7 @@
       activeChatId = key;
       setActiveSidebarItem(key);
       updateSendStopButton();
+      inputArea.disabled = chatStreams.has(key);
 
       // Cancel any active edit mode when switching chats
       editingFromMessageId = null;
@@ -947,13 +1183,14 @@
       // If we have a cached panel (e.g. streaming in background), just show it
       if (chatPanels[key]) {
         showPanel(key);
-        document.title = 'LinkedIn Bot';
+        document.title = "Roman's Agent";
+        requestAnimationFrame(() => scrollToBottom(true));
         return;
       }
 
       try {
         const chat = await apiGet(`/api/chats/${chatId}`);
-        document.title = chat.title ? `${chat.title} — LinkedIn Bot` : 'LinkedIn Bot';
+        document.title = chat.title ? `${chat.title} — Roman's Agent` : "Roman's Agent";
 
         if (!chat.messages || chat.messages.length === 0) {
           showPanel(key); // shows empty state since no panel exists yet
@@ -993,7 +1230,7 @@
         }
 
         showPanel(key);
-        scrollToBottom(true);
+        requestAnimationFrame(() => scrollToBottom(true));
         inputArea.focus();
       } catch (e) {
         console.error('Failed to load chat', e);
@@ -1010,7 +1247,7 @@
         // Show empty state for the new chat
         Object.values(chatPanels).forEach(p => { p.style.display = 'none'; });
         emptyState.style.display = '';
-        document.title = 'LinkedIn Bot';
+        document.title = "Roman's Agent";
         inputArea.focus();
       } catch (e) {
         console.error('Failed to create chat', e);
@@ -1034,7 +1271,7 @@
           loadChat(firstItem.dataset.chatId);
         } else {
           emptyState.style.display = '';
-          document.title = 'LinkedIn Bot';
+          document.title = "Roman's Agent";
         }
       }
     }
@@ -1045,7 +1282,7 @@
 
     const BTN_BASE = 'shrink-0 flex items-center gap-1.5 text-white text-sm font-medium rounded-xl px-4 py-2.5 transition';
     function updateSendStopButton() {
-      const isStreamingHere = streamingChatId !== null && streamingChatId === activeChatId;
+      const isStreamingHere = chatStreams.has(activeChatId);
       if (isStreamingHere) {
         sendBtn.className = `${BTN_BASE} bg-red-600 hover:bg-red-500 active:bg-red-700`;
         sendBtn.innerHTML = '<span>Stop</span><span class="text-base leading-none">■</span>';
@@ -1056,7 +1293,7 @@
     }
 
     function editMessage(text, messageId) {
-      if (streamingChatId) return;
+      if (chatStreams.has(activeChatId)) return;
       inputArea.value = text;
       inputArea.style.height = 'auto';
       inputArea.style.height = Math.min(inputArea.scrollHeight, 96) + 'px';
@@ -1067,7 +1304,7 @@
 
     async function sendMessage() {
       const text = inputArea.value.trim();
-      if (!text || streamingChatId === activeChatId) return;
+      if (!text || chatStreams.has(activeChatId)) return;
 
       // Edit-and-resend: truncate DB + remove DOM from that message onward
       if (editingFromMessageId && activeChatId) {
@@ -1106,10 +1343,17 @@
       inputArea.value = '';
       inputArea.style.height = '';
 
-      abortController = new AbortController();
-      streamingChatId = thisChatId;
+      const ctrl = new AbortController();
+      chatStreams.set(thisChatId, ctrl);
       updateSendStopButton();
       inputArea.disabled = true;
+      // Show streaming dot on sidebar item
+      const streamItem = document.getElementById(`chat-item-${thisChatId}`);
+      if (streamItem && !streamItem.querySelector('.chat-streaming-dot')) {
+        const dot = document.createElement('div');
+        dot.className = 'chat-streaming-dot';
+        streamItem.insertBefore(dot, streamItem.querySelector('.delete-btn'));
+      }
 
       const shell = createAssistantMessageShell(panel);
 
@@ -1118,17 +1362,15 @@
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ text }),
-          signal: abortController.signal,
+          signal: ctrl.signal,
         });
 
         if (!resp.ok) {
           let detail = `Server error ${resp.status}`;
           try { const j = await resp.json(); if (j.detail) detail = j.detail; } catch {}
           shell.showError(detail);
-          streamingChatId = null;
-          abortController = null;
-          updateSendStopButton();
-          inputArea.disabled = false;
+          chatStreams.delete(thisChatId);
+          if (activeChatId === thisChatId) { updateSendStopButton(); inputArea.disabled = false; }
           return;
         }
 
@@ -1158,11 +1400,15 @@
           shell.showError(e.message || 'Network error');
         }
       } finally {
-        streamingChatId = null;
-        abortController = null;
-        updateSendStopButton();
-        inputArea.disabled = false;
-        if (activeChatId === thisChatId) inputArea.focus();
+        chatStreams.delete(thisChatId);
+        // Remove streaming dot from sidebar item
+        const doneItem = document.getElementById(`chat-item-${thisChatId}`);
+        if (doneItem) doneItem.querySelector('.chat-streaming-dot')?.remove();
+        if (activeChatId === thisChatId) {
+          updateSendStopButton();
+          inputArea.disabled = false;
+          inputArea.focus();
+        }
       }
     }
 
@@ -1186,9 +1432,12 @@
         case 'title':
           if (event.title) {
             if (activeChatId === String(thisChatId))
-              document.title = `${event.title} — LinkedIn Bot`;
+              document.title = `${event.title} — Roman's Agent`;
             updateSidebarTitle(thisChatId, event.title);
           }
+          break;
+        case 'thumbnail':
+          if (event.url) updateSidebarThumbnail(thisChatId, event.url);
           break;
         case 'done':
           shell.finalize();
@@ -1206,8 +1455,9 @@
     // ════════════════════════════════════════════════════════════
 
     sendBtn.addEventListener('click', () => {
-      if (streamingChatId !== null && streamingChatId === activeChatId && abortController) {
-        abortController.abort();
+      const ctrl = chatStreams.get(activeChatId);
+      if (ctrl) {
+        ctrl.abort();
       } else {
         sendMessage();
       }
@@ -1228,12 +1478,253 @@
     newChatBtn.addEventListener('click', createNewChat);
 
     // ════════════════════════════════════════════════════════════
+    // MOBILE DRAWER
+    // ════════════════════════════════════════════════════════════
+
+    function openSidebar() {
+      sidebar.classList.add('open');
+      backdrop.classList.add('open');
+      document.body.style.overflow = 'hidden';
+    }
+    function closeSidebar() {
+      sidebar.classList.remove('open');
+      backdrop.classList.remove('open');
+      document.body.style.overflow = '';
+    }
+    menuToggle.addEventListener('click', openSidebar);
+    backdrop.addEventListener('click', closeSidebar);
+
+    // ════════════════════════════════════════════════════════════
+    // SIDEBAR TABS
+    // ════════════════════════════════════════════════════════════
+
+    function switchTab(tab) {
+      currentTab = tab;
+      tabChats.classList.toggle('active', tab === 'chats');
+      tabLibrary.classList.toggle('active', tab === 'library');
+      newChatWrap.style.display = tab === 'chats' ? '' : 'none';
+      if (tab === 'library') {
+        renderLibraryList();
+      } else {
+        loadChatList();
+      }
+    }
+    tabChats.addEventListener('click', () => switchTab('chats'));
+    tabLibrary.addEventListener('click', () => switchTab('library'));
+
+    // ════════════════════════════════════════════════════════════
+    // LIBRARY
+    // ════════════════════════════════════════════════════════════
+
+    async function renderLibraryList() {
+      try {
+        const items = await apiGet('/api/library');
+        sidebarList.innerHTML = '';
+        if (items.length === 0) {
+          const empty = document.createElement('p');
+          empty.className = 'text-xs text-slate-500 px-3 py-4 text-center';
+          empty.textContent = 'No saved posts yet.';
+          sidebarList.appendChild(empty);
+          return;
+        }
+        items.forEach(item => sidebarList.appendChild(renderLibraryItem(item)));
+      } catch (e) {
+        console.error('Failed to load library', e);
+      }
+    }
+
+    function renderLibraryItem(item) {
+      const el = document.createElement('div');
+      el.className = 'library-item rounded-lg px-3 py-2.5 mb-1 cursor-pointer';
+      el.dataset.libId = item.id;
+
+      const preview = document.createElement('p');
+      preview.className = 'text-xs text-slate-300 leading-relaxed line-clamp-3 mb-2';
+      preview.style.cssText = 'display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden';
+      preview.textContent = item.text;
+
+      const meta = document.createElement('div');
+      meta.className = 'flex items-center gap-1.5 flex-wrap';
+
+      const statusBadge = document.createElement('span');
+      statusBadge.className = `lib-status-badge ${item.status}`;
+      statusBadge.textContent = item.status;
+
+      if (item.promoted) {
+        const promBadge = document.createElement('span');
+        promBadge.className = 'lib-status-badge promoted';
+        promBadge.textContent = '✓ archive';
+        meta.appendChild(promBadge);
+      }
+
+      const date = document.createElement('span');
+      date.className = 'text-[10px] text-slate-500 ml-auto';
+      date.textContent = item.created_at ? new Date(item.created_at).toLocaleDateString('he-IL') : '';
+
+      meta.appendChild(statusBadge);
+      meta.appendChild(date);
+      el.appendChild(preview);
+      el.appendChild(meta);
+
+      // Actions row
+      const actions = document.createElement('div');
+      actions.className = 'flex gap-2 mt-2';
+
+      const copyBtn2 = document.createElement('button');
+      copyBtn2.className = 'text-[11px] text-slate-400 hover:text-indigo-400 transition';
+      copyBtn2.textContent = '📋';
+      copyBtn2.title = 'Copy';
+      copyBtn2.addEventListener('click', e => {
+        e.stopPropagation();
+        navigator.clipboard.writeText(item.text).then(() => { copyBtn2.textContent = '✓'; setTimeout(() => copyBtn2.textContent = '📋', 1500); });
+      });
+
+      const postBtn = document.createElement('button');
+      postBtn.className = 'text-[11px] text-slate-400 hover:text-green-400 transition';
+      postBtn.title = item.status === 'posted' ? 'Mark as draft' : 'Mark as posted';
+      postBtn.textContent = item.status === 'posted' ? '↩ Draft' : '✅ Posted';
+      postBtn.addEventListener('click', async e => {
+        e.stopPropagation();
+        const newStatus = item.status === 'posted' ? 'draft' : 'posted';
+        try {
+          const updated = await apiPatch(`/api/library/${item.id}`, { status: newStatus });
+          item.status = updated.status;
+          item.posted_at = updated.posted_at;
+          statusBadge.className = `lib-status-badge ${updated.status}`;
+          statusBadge.textContent = updated.status;
+          postBtn.textContent = updated.status === 'posted' ? '↩ Draft' : '✅ Posted';
+          postBtn.title = updated.status === 'posted' ? 'Mark as draft' : 'Mark as posted';
+        } catch (err) { console.error(err); }
+      });
+
+      const archiveBtn = document.createElement('button');
+      archiveBtn.className = 'text-[11px] transition ' + (item.promoted ? 'text-violet-400 cursor-default' : 'text-slate-400 hover:text-violet-400');
+      archiveBtn.textContent = item.promoted ? '✓ archive' : '🎓 archive';
+      archiveBtn.title = item.promoted ? 'Already in style archive' : 'Add to style archive';
+      archiveBtn.disabled = item.promoted;
+      archiveBtn.addEventListener('click', async e => {
+        e.stopPropagation();
+        if (item.promoted) return;
+        const ok = confirm('Add to style archive? The bot will learn to write like this post.');
+        if (!ok) return;
+        try {
+          await apiPost(`/api/library/${item.id}/promote`, {});
+          item.promoted = true;
+          archiveBtn.textContent = '✓ archive';
+          archiveBtn.className = 'text-[11px] text-violet-400 cursor-default';
+          archiveBtn.disabled = true;
+          const promBadge = document.createElement('span');
+          promBadge.className = 'lib-status-badge promoted';
+          promBadge.textContent = '✓ archive';
+          meta.insertBefore(promBadge, date);
+        } catch (err) { console.error(err); }
+      });
+
+      const delBtn2 = document.createElement('button');
+      delBtn2.className = 'text-[11px] text-slate-500 hover:text-red-400 transition ml-auto';
+      delBtn2.textContent = '🗑';
+      delBtn2.title = 'Delete';
+      delBtn2.addEventListener('click', async e => {
+        e.stopPropagation();
+        if (!confirm('Delete this saved post?')) return;
+        try {
+          await apiDelete(`/api/library/${item.id}`);
+          el.remove();
+        } catch (err) { console.error(err); }
+      });
+
+      actions.appendChild(copyBtn2);
+      actions.appendChild(postBtn);
+      actions.appendChild(archiveBtn);
+      actions.appendChild(delBtn2);
+      el.appendChild(actions);
+
+      return el;
+    }
+
+    // Called from assistant message shell to save a post
+    async function saveToLibrary(text, chatId, messageId) {
+      try {
+        const result = await apiPost('/api/library', { text, chat_id: chatId ? Number(chatId) : null, message_id: messageId ? Number(messageId) : null });
+        return result;
+      } catch (e) {
+        console.error('Failed to save to library', e);
+        return null;
+      }
+    }
+
+    // ════════════════════════════════════════════════════════════
+    // AUTH
+    // ════════════════════════════════════════════════════════════
+
+    const authModal  = document.getElementById('auth-modal');
+    const authInput  = document.getElementById('auth-input');
+    const authSubmit = document.getElementById('auth-submit');
+    const authError  = document.getElementById('auth-error');
+
+    function showAuthModal() {
+      authModal.classList.add('open');
+      setTimeout(() => authInput.focus(), 50);
+    }
+    function hideAuthModal() {
+      authModal.classList.remove('open');
+      authInput.value = '';
+      authError.classList.add('hidden');
+    }
+
+    async function submitLogin() {
+      const pw = authInput.value.trim();
+      if (!pw) return;
+      authSubmit.disabled = true;
+      authSubmit.textContent = 'Signing in…';
+      try {
+        await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password: pw }),
+        }).then(async r => {
+          if (!r.ok) {
+            authError.textContent = 'Wrong password';
+            authError.classList.remove('hidden');
+            return;
+          }
+          hideAuthModal();
+          loadChatList();
+        });
+      } catch (e) {
+        authError.textContent = 'Network error';
+        authError.classList.remove('hidden');
+      } finally {
+        authSubmit.disabled = false;
+        authSubmit.textContent = 'Sign in';
+      }
+    }
+
+    authSubmit.addEventListener('click', submitLogin);
+    authInput.addEventListener('keydown', e => { if (e.key === 'Enter') submitLogin(); });
+
+    // ════════════════════════════════════════════════════════════
     // BOOT
     // ════════════════════════════════════════════════════════════
 
-    loadChatList();
+    async function boot() {
+      try {
+        const r = await fetch('/api/auth/check');
+        const data = await r.json();
+        if (!data.authenticated) {
+          showAuthModal();
+          return;
+        }
+      } catch (e) {
+        // No auth configured or network error — proceed
+      }
+      loadChatList();
+    }
+
+    boot();
 
   })();
   </script>
 </body>
 </html>
+
