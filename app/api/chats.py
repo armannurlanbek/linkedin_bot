@@ -1,11 +1,12 @@
 import mimetypes
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 import httpx
 
+from app.config import settings
 from app.db import get_db, Chat, Message
 from app.services.agent import run_agent
 
@@ -130,6 +131,26 @@ def proxy_image(url: str = Query(...), download: bool = False):
         raise
     except Exception:
         raise HTTPException(502, "Failed to proxy image")
+
+
+@router.post("/transcribe")
+async def transcribe_audio(file: UploadFile = File(...)):
+    """Transcribe audio via OpenAI Whisper. Accepts webm/mp4/wav/ogg."""
+    from openai import OpenAI
+    audio_bytes = await file.read()
+    if not audio_bytes:
+        raise HTTPException(400, "Empty audio file")
+    try:
+        client = OpenAI(api_key=settings.openai_api_key)
+        fname = file.filename or "audio.webm"
+        mime = file.content_type or "audio/webm"
+        resp = client.audio.transcriptions.create(
+            model="whisper-1",
+            file=(fname, audio_bytes, mime),
+        )
+        return {"text": resp.text}
+    except Exception as e:
+        raise HTTPException(500, f"Transcription failed: {e}")
 
 
 @router.post("/chats/{chat_id}/messages")

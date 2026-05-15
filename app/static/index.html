@@ -162,6 +162,16 @@
       font-size: 18px; color: white;
     }
 
+    /* ── Mic button states ────────────────────────────────────── */
+    #mic-btn.recording {
+      background: #fee2e2; border-color: #fca5a5; color: #dc2626;
+    }
+    #mic-btn.transcribing {
+      opacity: 0.6; cursor: not-allowed;
+    }
+    #mic-btn.transcribing svg { animation: spin 1s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
     /* ── Edit mode indicator ──────────────────────────────────── */
     #input-area.editing-mode {
       border-color: #f59e0b;
@@ -374,6 +384,23 @@
 
     <!-- Input bar -->
     <div class="border-t border-slate-200 px-4 py-3 flex items-end gap-3 bg-white shadow-sm">
+      <button
+        id="mic-btn"
+        title="Voice input"
+        class="shrink-0 flex items-center justify-center w-10 h-10 rounded-xl border border-slate-200 bg-slate-50 text-slate-500 hover:text-indigo-600 hover:border-indigo-300 transition"
+      >
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="9" y="2" width="6" height="11" rx="3"/>
+          <path d="M19 10a7 7 0 0 1-14 0"/>
+          <line x1="12" y1="19" x2="12" y2="23"/>
+          <line x1="8" y1="23" x2="16" y2="23"/>
+        </svg>
+      </button>
+      <!-- Voice recording bar (shown instead of textarea during recording) -->
+      <div id="voice-bar" class="hidden flex-1 flex items-center gap-3 rounded-xl border border-indigo-300 bg-indigo-50 px-3" style="height:44px">
+        <canvas id="voice-wave" height="32" style="flex:1;display:block"></canvas>
+        <span id="voice-status" class="text-xs text-indigo-500 shrink-0 font-medium"></span>
+      </div>
       <textarea
         id="input-area"
         rows="1"
@@ -1285,6 +1312,7 @@
     const BTN_BASE = 'shrink-0 flex items-center gap-1.5 text-white text-sm font-medium rounded-xl px-4 py-2.5 transition';
     function updateSendStopButton() {
       const isStreamingHere = chatStreams.has(activeChatId);
+      sendBtn.style.display = ''; // ensure always visible (voice input may have hidden it)
       if (isStreamingHere) {
         sendBtn.className = `${BTN_BASE} bg-red-600 hover:bg-red-500 active:bg-red-700`;
         sendBtn.innerHTML = '<span>Stop</span><span class="text-base leading-none">■</span>';
@@ -1704,6 +1732,129 @@
 
     authSubmit.addEventListener('click', submitLogin);
     authInput.addEventListener('keydown', e => { if (e.key === 'Enter') submitLogin(); });
+
+    // ════════════════════════════════════════════════════════════
+    // VOICE INPUT
+    // ════════════════════════════════════════════════════════════
+
+    const micBtn       = document.getElementById('mic-btn');
+    const voiceBar     = document.getElementById('voice-bar');
+    const voiceWave    = document.getElementById('voice-wave');
+    const voiceStatus  = document.getElementById('voice-status');
+
+    const _MIC_SVG = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="11" rx="3"/><path d="M19 10a7 7 0 0 1-14 0"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>`;
+    const _STOP_SVG = `<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="3"/></svg>`;
+    const _SPIN_SVG = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M12 2a10 10 0 0 1 10 10"/></svg>`;
+
+    let _recorder = null;
+    let _chunks   = [];
+    let _waveRaf  = null;
+    let _micStream = null;
+    let _audioCtx  = null;
+
+    function _drawWave(analyser) {
+      const ctx = voiceWave.getContext('2d');
+      const W = voiceWave.width, H = voiceWave.height;
+      const bufLen = analyser.frequencyBinCount;
+      const data = new Uint8Array(bufLen);
+      const BAR = 3, COUNT = Math.floor(W / (BAR + 3));
+      const GAP = (W - COUNT * BAR) / (COUNT + 1);
+      function frame() {
+        _waveRaf = requestAnimationFrame(frame);
+        analyser.getByteFrequencyData(data);
+        ctx.clearRect(0, 0, W, H);
+        for (let i = 0; i < COUNT; i++) {
+          const v = data[Math.floor(i * bufLen / COUNT)] / 255;
+          const h = Math.max(4, v * (H - 4));
+          const x = GAP + i * (BAR + GAP);
+          const y = (H - h) / 2;
+          const g = ctx.createLinearGradient(x, y, x, y + h);
+          g.addColorStop(0, '#a5b4fc'); g.addColorStop(1, '#6366f1');
+          ctx.fillStyle = g;
+          ctx.beginPath();
+          if (ctx.roundRect) ctx.roundRect(x, y, BAR, h, 1.5);
+          else ctx.rect(x, y, BAR, h);
+          ctx.fill();
+        }
+      }
+      frame();
+    }
+
+    async function _startVoice() {
+      try {
+        _micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      } catch {
+        alert('Microphone access denied. Please allow microphone in browser settings.');
+        return;
+      }
+      _audioCtx = new AudioContext();
+      const analyser = _audioCtx.createAnalyser();
+      analyser.fftSize = 256;
+      _audioCtx.createMediaStreamSource(_micStream).connect(analyser);
+
+      _chunks = [];
+      _recorder = new MediaRecorder(_micStream);
+      _recorder.ondataavailable = e => { if (e.data.size > 0) _chunks.push(e.data); };
+      _recorder.onstop = _handleStop;
+      _recorder.start();
+
+      // Swap textarea → voice bar
+      inputArea.style.display = 'none';
+      sendBtn.style.display = 'none';
+      voiceBar.classList.remove('hidden');
+      voiceWave.width  = voiceBar.clientWidth - 80;
+      voiceWave.height = 32;
+      voiceStatus.textContent = '● REC';
+      micBtn.innerHTML = _STOP_SVG;
+      micBtn.classList.add('recording');
+      _drawWave(analyser);
+    }
+
+    function _stopVoice() {
+      if (_recorder?.state === 'recording') _recorder.stop();
+      _micStream?.getTracks().forEach(t => t.stop());
+      cancelAnimationFrame(_waveRaf);
+      _audioCtx?.close();
+      micBtn.innerHTML = _SPIN_SVG;
+      micBtn.classList.remove('recording');
+      micBtn.classList.add('transcribing');
+      voiceStatus.textContent = 'Transcribing…';
+    }
+
+    async function _handleStop() {
+      const mime = _recorder.mimeType || 'audio/webm';
+      const blob = new Blob(_chunks, { type: mime });
+      const ext  = mime.includes('ogg') ? '.ogg' : mime.includes('mp4') ? '.mp4' : '.webm';
+      const form = new FormData();
+      form.append('file', blob, `voice${ext}`);
+      try {
+        const r = await fetch('/api/transcribe', { method: 'POST', body: form });
+        if (r.status === 401) { showAuthModal(); return; }
+        if (!r.ok) throw new Error(`${r.status}`);
+        const { text } = await r.json();
+        if (text) {
+          const existing = inputArea.value.trim();
+          inputArea.value = existing ? existing + ' ' + text : text;
+          inputArea.style.height = 'auto';
+          inputArea.style.height = Math.min(inputArea.scrollHeight, 96) + 'px';
+        }
+      } catch (e) {
+        console.error('Transcription error', e);
+      } finally {
+        voiceBar.classList.add('hidden');
+        inputArea.style.display = '';
+        sendBtn.style.display = '';
+        micBtn.innerHTML = _MIC_SVG;
+        micBtn.classList.remove('transcribing');
+        micBtn.disabled = false;
+        inputArea.focus();
+      }
+    }
+
+    micBtn.addEventListener('click', () => {
+      if (_recorder?.state === 'recording') _stopVoice();
+      else _startVoice();
+    });
 
     // ════════════════════════════════════════════════════════════
     // BOOT
