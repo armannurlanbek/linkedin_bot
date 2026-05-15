@@ -494,6 +494,7 @@
     // ── App state ───────────────────────────────────────────────
     let activeChatId         = null;
     const chatStreams         = new Map(); // chatId → AbortController
+    const messageAttachmentsMap = new Map(); // messageId → [{block, name, kind, objectUrl?}]
     let editingFromMessageId = null;
     const chatPanels         = {};
     let currentTab           = 'chats'; // 'chats' | 'library'
@@ -1328,6 +1329,7 @@
                   return { block: b, name: fname, kind: ext === 'docx' ? 'docx' : 'text' };
                 });
               appendUserMessage(text, panel, msg.id, historyAttachments);
+              if (historyAttachments.length > 0) messageAttachmentsMap.set(String(msg.id), historyAttachments);
               // Restore images stored in tool_results
               if (lastShell) {
                 content.forEach(b => {
@@ -1422,6 +1424,22 @@
       inputArea.style.height = 'auto';
       inputArea.style.height = Math.min(inputArea.scrollHeight, 96) + 'px';
       editingFromMessageId = messageId;
+
+      // Restore original attachments into the pending strip
+      _clearAttachments();
+      const savedAttachments = messageAttachmentsMap.get(String(messageId)) || [];
+      for (const a of savedAttachments) {
+        let objectUrl = a.objectUrl || null;
+        // For images from history that have no live objectUrl, derive one from base64
+        if (!objectUrl && a.block?.type === 'image' && a.block?.source?.data) {
+          const bytes = Uint8Array.from(atob(a.block.source.data), c => c.charCodeAt(0));
+          objectUrl = URL.createObjectURL(new Blob([bytes], { type: a.block.source.media_type }));
+        }
+        pendingAttachments.push({ ...a, objectUrl });
+        attachStrip.appendChild(_makeChip(a.name, a.kind, objectUrl));
+      }
+      if (pendingAttachments.length > 0) attachStrip.classList.remove('hidden');
+
       inputArea.classList.add('editing-mode');
       inputArea.focus();
     }
@@ -1464,7 +1482,7 @@
       const thisChatId = activeChatId;
       const panel = getOrCreatePanel(thisChatId);
       const snapshotAttachments = pendingAttachments.slice();
-      appendUserMessage(text, panel, null, snapshotAttachments);
+      const userMsgWrap = appendUserMessage(text, panel, null, snapshotAttachments);
       _clearAttachments();
       inputArea.value = '';
       inputArea.style.height = '';
@@ -1515,6 +1533,19 @@
             if (!part.startsWith('data: ')) continue;
             let event;
             try { event = JSON.parse(part.slice(6)); } catch { continue; }
+            if (event.type === 'user_message_id') {
+              userMsgWrap.dataset.messageId = String(event.id);
+              if (snapshotAttachments.length > 0) messageAttachmentsMap.set(String(event.id), snapshotAttachments);
+              const editBtn = document.createElement('button');
+              editBtn.className = 'text-xs text-slate-400 hover:text-amber-500 transition';
+              editBtn.style.cssText = 'opacity:0;font-size:11px';
+              editBtn.textContent = '✏️ Edit & resend';
+              editBtn.addEventListener('click', () => editMessage(text, event.id));
+              userMsgWrap.addEventListener('mouseenter', () => { editBtn.style.opacity = '1'; });
+              userMsgWrap.addEventListener('mouseleave', () => { editBtn.style.opacity = '0'; });
+              userMsgWrap.appendChild(editBtn);
+              continue;
+            }
             handleSSEEvent(event, shell, thisChatId);
           }
         }
