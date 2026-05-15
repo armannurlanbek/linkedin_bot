@@ -504,7 +504,7 @@
       return wrap;
     }
 
-    function renderSidebarItem(chat) {
+    function renderSidebarItem(chat, append = false) {
       const existing = document.getElementById(`chat-item-${chat.id}`);
       if (existing) {
         const titleEl = existing.querySelector('.chat-title');
@@ -548,7 +548,8 @@
       item.appendChild(del);
 
       item.addEventListener('click', () => { loadChat(chat.id); closeSidebar(); });
-      sidebarList.prepend(item);
+      if (append) sidebarList.appendChild(item);
+      else sidebarList.prepend(item);
       return item;
     }
 
@@ -873,15 +874,14 @@
       const saveBtn = document.createElement('button');
       saveBtn.className = 'hidden self-end text-xs font-medium text-slate-600 bg-white hover:bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5 transition shadow-sm';
       saveBtn.textContent = '💾 שמור';
-      let savedMessageId = null;
       saveBtn.addEventListener('click', async () => {
         const text = postContent.textContent;
         if (!text) return;
         saveBtn.disabled = true;
         saveBtn.textContent = '…';
-        const result = await saveToLibrary(text, activeChatId, savedMessageId);
+        const result = await saveToLibrary(text, activeChatId);
         if (result) {
-          saveBtn.textContent = result.already_saved ? '✓ נשמר' : '✓ נשמר';
+          saveBtn.textContent = '✓ נשמר';
           saveBtn.classList.add('text-green-600', 'border-green-300');
         } else {
           saveBtn.textContent = '💾 שמור';
@@ -1157,7 +1157,7 @@
         const sorted = [...chats].sort((a, b) =>
           new Date(b.updated_at || b.created_at) - new Date(a.updated_at || a.created_at)
         );
-        sorted.forEach(c => renderSidebarItem(c));
+        sorted.forEach(c => renderSidebarItem(c, true));
         if (sorted.length > 0) {
           loadChat(sorted[0].id);
         } else {
@@ -1244,6 +1244,8 @@
         renderSidebarItem(chat);
         activeChatId = String(chat.id);
         setActiveSidebarItem(activeChatId);
+        updateSendStopButton();
+        inputArea.disabled = false;
         // Show empty state for the new chat
         Object.values(chatPanels).forEach(p => { p.style.display = 'none'; });
         emptyState.style.display = '';
@@ -1643,9 +1645,9 @@
     }
 
     // Called from assistant message shell to save a post
-    async function saveToLibrary(text, chatId, messageId) {
+    async function saveToLibrary(text, chatId) {
       try {
-        const result = await apiPost('/api/library', { text, chat_id: chatId ? Number(chatId) : null, message_id: messageId ? Number(messageId) : null });
+        const result = await apiPost('/api/library', { text, chat_id: chatId ? Number(chatId) : null });
         return result;
       } catch (e) {
         console.error('Failed to save to library', e);

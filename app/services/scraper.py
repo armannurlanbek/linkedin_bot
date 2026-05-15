@@ -81,13 +81,44 @@ def _tavily_extract(url: str) -> dict | None:
         raw_content = r.get("raw_content") or r.get("content") or ""
         if not raw_content:
             return None
-        # raw_content may be HTML or plain text
         if "<html" in raw_content[:200].lower() or "<body" in raw_content[:200].lower():
             return _parse_html(raw_content, url)
-        # Plain text response
         return {
             "title": "",
             "text": raw_content.strip(),
+            "images": [],
+            "url": url,
+        }
+    except Exception:
+        return None
+
+
+def _tavily_search(url: str) -> dict | None:
+    """Search Tavily's index for the URL — hits cached content, more resilient than extract."""
+    if not settings.tavily_api_key:
+        return None
+    try:
+        from tavily import TavilyClient
+        client = TavilyClient(api_key=settings.tavily_api_key)
+        resp = client.search(query=url, max_results=3, include_raw_content=True)
+        results = resp.get("results", [])
+        if not results:
+            return None
+        # Prefer a result whose URL closely matches the original
+        best = None
+        for r in results:
+            content = r.get("raw_content") or r.get("content") or ""
+            if len(content) >= 50:
+                best = r
+                break
+        if not best:
+            return None
+        content = best.get("raw_content") or best.get("content") or ""
+        if "<html" in content[:200].lower() or "<body" in content[:200].lower():
+            return _parse_html(content, url)
+        return {
+            "title": best.get("title", ""),
+            "text": content.strip(),
             "images": [],
             "url": url,
         }
@@ -103,7 +134,7 @@ _LOGIN_WALL_DOMAINS = (
 _LOGIN_WALL_PATTERNS = ("login", "signin", "sign-in", "auth/", "checkpoint")
 
 
-def _is_login_wall(original_url: str, final_url: str) -> bool:
+def _is_login_wall(final_url: str) -> bool:
     """True if the response redirected to a login/auth page."""
     final = final_url.lower()
     return any(p in final for p in _LOGIN_WALL_PATTERNS)
@@ -112,7 +143,8 @@ def _is_login_wall(original_url: str, final_url: str) -> bool:
 def scrape(url: str) -> dict:
     """Return {title, text, images, url}. Uses Tavily extract for social media and login-walled pages."""
     from urllib.parse import urlparse
-    host = urlparse(url).netloc.lower().lstrip("www.")
+    netloc = urlparse(url).netloc.lower()
+    host = netloc[4:] if netloc.startswith("www.") else netloc
     is_social = any(host == d or host.endswith("." + d) for d in _LOGIN_WALL_DOMAINS)
 
     # Social platforms: go straight to Tavily (httpx always gets login walls)
@@ -120,6 +152,10 @@ def scrape(url: str) -> dict:
         tavily_result = _tavily_extract(url)
         if tavily_result and len(tavily_result.get("text", "")) >= 50:
             return tavily_result
+        # Extract failed or returned too little — try search index as fallback
+        search_result = _tavily_search(url)
+        if search_result and len(search_result.get("text", "")) >= 50:
+            return search_result
         return {"title": "", "text": "Could not extract content — the post may be private or require login.", "images": [], "url": url}
 
     # All other URLs: try httpx first
@@ -130,7 +166,7 @@ def scrape(url: str) -> dict:
             resp.raise_for_status()
             final_url = str(resp.url)
         # Redirect to a login wall — fall through to Tavily
-        if _is_login_wall(url, final_url):
+        if _is_login_wall(final_url):
             result = None
         else:
             result = _parse_html(resp.text, url)
@@ -143,6 +179,11 @@ def scrape(url: str) -> dict:
     tavily_result = _tavily_extract(url)
     if tavily_result and len(tavily_result.get("text", "")) >= 50:
         return tavily_result
+
+    # Last resort: Tavily search index
+    search_result = _tavily_search(url)
+    if search_result and len(search_result.get("text", "")) >= 50:
+        return search_result
 
     if result is not None:
         return result

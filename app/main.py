@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy import text
 
 from app.api.auth import is_authenticated, set_auth_cookie, router as auth_router
 from app.api.chats import router as chats_router
@@ -57,10 +58,11 @@ def index():
 
 @app.get("/health")
 def health():
+    db = SessionLocal()
     try:
-        db = SessionLocal()
-        db.execute(__import__("sqlalchemy").text("SELECT 1"))
-        db.close()
+        db.execute(text("SELECT 1"))
         return {"status": "ok"}
     except Exception as e:
         return JSONResponse({"status": "error", "detail": str(e)}, status_code=503)
+    finally:
+        db.close()

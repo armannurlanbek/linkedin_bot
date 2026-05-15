@@ -107,7 +107,7 @@ def proxy_image(url: str = Query(...), download: bool = False):
             content_type, ext = "image/gif", ".gif"
         elif data[:4] == b'RIFF' and data[8:12] == b'WEBP':
             content_type, ext = "image/webp", ".webp"
-        elif len(data) >= 12 and data[4:8] == b'ftyp' and b'avif' in data[8:16].lower():
+        elif len(data) >= 12 and data[4:8] == b'ftyp' and b'avif' in data[8:16]:
             content_type, ext = "image/avif", ".avif"
         elif raw_ct == "image/svg+xml":
             content_type, ext = "image/svg+xml", ".svg"
