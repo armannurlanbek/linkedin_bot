@@ -1,4 +1,7 @@
+# Environment
 .env
+
+# Python
 __pycache__/
 *.py[cod]
 *.egg-info/
@@ -6,4 +9,27 @@ dist/
 build/
 .venv/
 venv/
+
+# Data exports
 *.csv
+
+# IDE / Claude Code local settings
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Server & infrastructure docs (sensitive)
+SERVER.md
+n8n Server - Orlanda Handbook (2).md
+
+# Raw / unprocessed assets
+ORLANDA logo*.png
+
+# Conversation / session logs
+claude_linkedin_bot_conversation.txt
+DEPLOY.md
