@@ -164,6 +164,10 @@ def _sanitize_block(block: dict) -> dict:
             "tool_use_id": block.get("tool_use_id", ""),
             "content": block.get("content", ""),
         }
+    if t == "image":
+        return {"type": "image", "source": block["source"]}
+    if t == "document":
+        return {"type": "document", "source": block["source"]}
     return block
 
 
@@ -240,10 +244,21 @@ def _load_history(db: Session, chat_id: int) -> list:
     for m in messages:
         content = m.content
         if isinstance(content, list):
-            content = [
-                _sanitize_block(b) if isinstance(b, dict) else b
-                for b in content
-            ]
+            sanitized = []
+            has_text = False
+            for b in content:
+                block = _sanitize_block(b) if isinstance(b, dict) else b
+                if isinstance(block, dict) and block.get("type") == "text":
+                    if not block.get("text", "").strip():
+                        continue  # drop empty text blocks — cause API 400 errors
+                    has_text = True
+                sanitized.append(block)
+            if not sanitized:
+                content = [{"type": "text", "text": "(הודעה ריקה)"}]
+            elif m.role == "user" and not has_text:
+                content = sanitized + [{"type": "text", "text": "בדוק את הקבצים המצורפים והשתמש בהם כהקשר לפי הצורך."}]
+            else:
+                content = sanitized
         result.append({"role": m.role, "content": content})
     return _repair_tool_pairs(result)
 
@@ -266,7 +281,7 @@ def _generate_title(user_text: str) -> str:
     return resp.content[0].text.strip()
 
 
-def run_agent(chat_id: int, user_text: str, db: Session):
+def run_agent(chat_id: int, user_text: str, db: Session, attachments: list[dict] | None = None):
     """Sync generator — yields SSE strings."""
     try:
         client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
@@ -275,13 +290,15 @@ def run_agent(chat_id: int, user_text: str, db: Session):
         existing = db.query(Message).filter(Message.chat_id == chat_id).count()
         is_first = existing == 0
 
-        # Save user message
-        _save_message(db, chat_id, "user", [{"type": "text", "text": user_text}])
+        # Save actual user input — fallback text is injected by _load_history for the API call only
+        db_content = list(attachments or []) + ([{"type": "text", "text": user_text}] if user_text.strip() else [])
+        _save_message(db, chat_id, "user", db_content)
 
         # Generate and emit title on first message
+        effective_text = user_text.strip() or "בדוק את הקבצים המצורפים והשתמש בהם כהקשר לפי הצורך."
         if is_first:
             try:
-                title = _generate_title(user_text)
+                title = _generate_title(effective_text)
                 db.query(Chat).filter(Chat.id == chat_id).update({"title": title})
                 db.commit()
                 yield _sse({"type": "title", "title": title})

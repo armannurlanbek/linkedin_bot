@@ -1,3 +1,5 @@
+import base64
+import io
 import mimetypes
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
@@ -12,6 +14,10 @@ from app.services.agent import run_agent
 
 router = APIRouter(prefix="/api")
 
+_MAX_IMAGE_BYTES = 5 * 1024 * 1024
+_MAX_PDF_BYTES   = 10 * 1024 * 1024
+_MAX_TEXT_BYTES  = 1 * 1024 * 1024
+
 
 class ChatCreate(BaseModel):
     title: str = "New chat"
@@ -19,6 +25,7 @@ class ChatCreate(BaseModel):
 
 class MessageBody(BaseModel):
     text: str
+    attachments: list[dict] = []
 
 
 @router.post("/chats", status_code=201)
@@ -133,6 +140,56 @@ def proxy_image(url: str = Query(...), download: bool = False):
         raise HTTPException(502, "Failed to proxy image")
 
 
+@router.post("/upload")
+async def upload_file(file: UploadFile = File(...)):
+    """Convert an uploaded file to an Anthropic content block (image/document/text)."""
+    data = await file.read()
+    name = file.filename or "file"
+    mime = file.content_type or ""
+    ext  = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+
+    # Image → native vision block
+    if ext in ("jpg", "jpeg", "png", "gif", "webp") or mime.startswith("image/"):
+        if len(data) > _MAX_IMAGE_BYTES:
+            raise HTTPException(413, "Image too large (max 5 MB)")
+        if mime.startswith("image/"):
+            media_type = mime
+        else:
+            media_type = f"image/{'jpeg' if ext in ('jpg','jpeg') else ext}"
+        block = {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": base64.b64encode(data).decode()}}
+        return {"block": block, "name": name, "kind": "image"}
+
+    # PDF → native document block
+    if ext == "pdf" or mime == "application/pdf":
+        if len(data) > _MAX_PDF_BYTES:
+            raise HTTPException(413, "PDF too large (max 10 MB)")
+        block = {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": base64.b64encode(data).decode()}}
+        return {"block": block, "name": name, "kind": "pdf"}
+
+    # DOCX → extract text
+    if ext == "docx":
+        if len(data) > _MAX_TEXT_BYTES:
+            raise HTTPException(413, "File too large (max 1 MB)")
+        try:
+            from docx import Document as DocxDocument
+            doc = DocxDocument(io.BytesIO(data))
+            text = "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+        except Exception as e:
+            raise HTTPException(500, f"Could not read DOCX: {e}")
+        block = {"type": "text", "text": f"[File: {name}]\n{text}"}
+        return {"block": block, "name": name, "kind": "docx"}
+
+    # TXT / MD → plain text
+    if ext in ("txt", "md") or mime.startswith("text/"):
+        if len(data) > _MAX_TEXT_BYTES:
+            raise HTTPException(413, "File too large (max 1 MB)")
+        text = data.decode("utf-8", errors="replace")
+        block = {"type": "text", "text": f"[File: {name}]\n{text}"}
+        return {"block": block, "name": name, "kind": "text"}
+
+    raise HTTPException(415, f"Unsupported file type: .{ext or mime}")
+
+
 @router.post("/transcribe")
 async def transcribe_audio(file: UploadFile = File(...)):
     """Transcribe audio via OpenAI Whisper. Accepts webm/mp4/wav/ogg."""
@@ -159,7 +216,7 @@ def send_message(chat_id: int, body: MessageBody, db: Session = Depends(get_db))
     if not chat:
         raise HTTPException(404, "Chat not found")
     return StreamingResponse(
-        run_agent(chat_id, body.text, db),
+        run_agent(chat_id, body.text, db, body.attachments),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
