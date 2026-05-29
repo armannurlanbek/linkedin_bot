@@ -1,9 +1,13 @@
+import logging
+
 from sqlalchemy import Boolean, create_engine, text
 from sqlalchemy.orm import declarative_base, sessionmaker
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import Column, Integer, String, DateTime, func, ForeignKey
 from sqlalchemy.dialects.postgresql import JSONB
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 engine = create_engine(settings.database_url_sync)
 SessionLocal = sessionmaker(bind=engine)
@@ -57,9 +61,19 @@ class LibraryPost(Base):
 
 
 def init_db():
-    with engine.connect() as conn:
-        conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-        conn.commit()
+    # The `vector` extension is provisioned once by a superuser in db_roman.
+    # The app's role ("roman") is NOT a superuser and cannot CREATE EXTENSION,
+    # and on rare occasions the connection may briefly be read-only during a
+    # failover. Attempt it best-effort so neither case crashes startup.
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+            conn.commit()
+    except Exception as exc:
+        logger.warning(
+            "Skipping CREATE EXTENSION vector (already present or insufficient "
+            "privilege): %s", exc,
+        )
     Base.metadata.create_all(bind=engine)
     # Additive migrations — safe to re-run on every startup
     _migrate()

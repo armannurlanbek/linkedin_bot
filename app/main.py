@@ -26,6 +26,7 @@ async def auth_middleware(request: Request, call_next):
     if (
         path.startswith("/api/auth/")
         or path == "/health"
+        or path == "/healthz"
         or path == "/"
         or path.startswith("/static/")
     ):
@@ -54,6 +55,12 @@ app.mount("/static", StaticFiles(directory="app/static"), name="static")
 @app.get("/")
 def index():
     return FileResponse("app/static/index.html")
+
+
+@app.get("/healthz")
+def healthz():
+    # Liveness probe for the external load balancer — does NOT touch the database.
+    return {"status": "ok"}
 
 
 @app.get("/health")

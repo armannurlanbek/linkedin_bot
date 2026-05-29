@@ -1,30 +1,20 @@
 services:
-  db:
-    image: pgvector/pgvector:pg16
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: ${POSTGRES_DB:-linkedin_bot}
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    expose:
-      - "5432"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-    restart: unless-stopped
-
   api:
     build: .
     env_file: .env
+    environment:
+      # Assembled here from DB_PASSWORD (set in .env). The app reaches Postgres
+      # through the host db-router (HAProxy), which always forwards to the
+      # current cluster primary. Plaintext over the local Docker network — no SSL.
+      DATABASE_URL_SYNC: postgresql://roman:${DB_PASSWORD}@db-router:5432/db_roman
+      DATABASE_URL: postgresql+asyncpg://roman:${DB_PASSWORD}@db-router:5432/db_roman
     ports:
-      - "127.0.0.1:8000:8000"
-    depends_on:
-      db:
-        condition: service_healthy
+      # Localhost only — Cloudflare Tunnel serves this publicly, not direct exposure.
+      - "127.0.0.1:8082:8000"
+    networks:
+      - orlanda
     restart: unless-stopped
 
-volumes:
-  pgdata:
+networks:
+  orlanda:
+    external: true
