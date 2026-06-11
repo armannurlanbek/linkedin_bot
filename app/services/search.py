@@ -44,6 +44,43 @@ def build_project_query(title: str, article_text: str) -> str:
     return f"{title} developer contractor architect facade"
 
 
+def find_linkedin_profiles(company_name: str) -> dict:
+    """Search for a company's LinkedIn page. Returns up to 3 candidates."""
+    if not settings.tavily_api_key:
+        return {"candidates": [], "count": 0}
+    try:
+        from tavily import TavilyClient
+        client = TavilyClient(api_key=settings.tavily_api_key)
+        response = client.search(
+            query=f'"{company_name}" site:linkedin.com/company',
+            search_depth="basic",
+            max_results=5,
+        )
+        candidates = []
+        seen_slugs: set[str] = set()
+        for r in response.get("results", []):
+            url = r.get("url", "")
+            if "linkedin.com/company/" not in url:
+                continue
+            slug = url.split("linkedin.com/company/")[1].split("/")[0].split("?")[0]
+            if not slug or slug in seen_slugs:
+                continue
+            seen_slugs.add(slug)
+            title = r.get("title", company_name)
+            for suffix in (" | LinkedIn", " - LinkedIn", "| LinkedIn", "- LinkedIn"):
+                title = title.replace(suffix, "").strip()
+            candidates.append({
+                "title": title,
+                "url": f"https://www.linkedin.com/company/{slug}",
+                "description": (r.get("content") or "")[:100].strip(),
+            })
+            if len(candidates) >= 3:
+                break
+        return {"candidates": candidates, "count": len(candidates)}
+    except Exception:
+        return {"candidates": [], "count": 0}
+
+
 def search_images(query: str) -> list[str]:
     """Search for building/architecture images using Tavily's image search."""
     if not settings.tavily_api_key:

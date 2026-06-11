@@ -1,6 +1,9 @@
 import base64
 import io
+import json
 import mimetypes
+import queue
+import threading
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
 from fastapi.responses import StreamingResponse
@@ -9,7 +12,7 @@ from sqlalchemy.orm import Session
 import httpx
 
 from app.config import settings
-from app.db import get_db, Chat, Message
+from app.db import get_db, Chat, Message, SessionLocal
 from app.services.agent import run_agent
 
 router = APIRouter(prefix="/api")
@@ -51,7 +54,7 @@ def get_chat(chat_id: int, db: Session = Depends(get_db)):
     messages = (
         db.query(Message)
         .filter(Message.chat_id == chat_id)
-        .order_by(Message.created_at)
+        .order_by(Message.created_at, Message.id)
         .all()
     )
     return {
@@ -210,13 +213,47 @@ async def transcribe_audio(file: UploadFile = File(...)):
         raise HTTPException(500, f"Transcription failed: {e}")
 
 
+def _agent_stream(chat_id: int, text: str, attachments: list[dict]):
+    """Bridge the agent's work to the HTTP stream via a background worker thread.
+
+    The worker runs run_agent to completion with its OWN db session and pushes SSE
+    events into a queue. Because the worker is independent of the HTTP response, the
+    full turn is generated and persisted even if the client disconnects mid-stream
+    (e.g. a phone backgrounds Safari after pasting). Abandoning the HTTP generator
+    does not stop the worker — it keeps draining into the unbounded queue and commits.
+    """
+    q: "queue.Queue[str | None]" = queue.Queue()
+
+    def worker():
+        db = SessionLocal()
+        try:
+            for sse in run_agent(chat_id, text, db, attachments):
+                q.put(sse)
+        except Exception as e:
+            try:
+                q.put(f"data: {json.dumps({'type': 'error', 'message': str(e)}, ensure_ascii=False)}\n\n")
+            except Exception:
+                pass
+        finally:
+            db.close()
+            q.put(None)  # sentinel — signals the HTTP generator to stop
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    while True:
+        item = q.get()
+        if item is None:
+            break
+        yield item
+
+
 @router.post("/chats/{chat_id}/messages")
 def send_message(chat_id: int, body: MessageBody, db: Session = Depends(get_db)):
     chat = db.query(Chat).filter(Chat.id == chat_id).first()
     if not chat:
         raise HTTPException(404, "Chat not found")
     return StreamingResponse(
-        run_agent(chat_id, body.text, db, body.attachments),
+        _agent_stream(chat_id, body.text, body.attachments),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

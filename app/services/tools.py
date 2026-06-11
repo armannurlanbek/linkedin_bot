@@ -41,6 +41,26 @@ TOOLS = [
         }
     },
     {
+        "name": "find_linkedin_profiles",
+        "description": (
+            "Find the LinkedIn company page for the single most important company in the post "
+            "(developer > main contractor > architect > facade contractor). "
+            "Call this tool ONCE only — not for every company mentioned. "
+            "Rules based on result:\n"
+            "• count=1 → confirmed; write @CompanyName in the post\n"
+            "• count=0 → no @mention; write plain company name\n"
+            "• count≥2 → DO NOT write the post yet; a disambiguation UI will appear; "
+            "respond briefly that profiles were found and you will write after user selects"
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "company_name": {"type": "string", "description": "Exact company name to look up on LinkedIn"}
+            },
+            "required": ["company_name"]
+        }
+    },
+    {
         "name": "search_images",
         "description": "Search the internet for high-quality photos of this specific building or architectural project. Use when the user asks for images, or to find building exterior/facade photos to supplement the article.",
         "input_schema": {
@@ -75,6 +95,9 @@ def execute_tool(name: str, args: dict, db) -> dict:
             + "\n\n---\n\n".join(sections)
         )
         return {"style_examples": formatted, "count": len(results)}
+    if name == "find_linkedin_profiles":
+        from app.services.search import find_linkedin_profiles
+        return find_linkedin_profiles(args["company_name"])
     if name == "search_images":
         from app.services.search import search_images
         images = search_images(args["query"])
@@ -99,6 +122,13 @@ def summarize_result(name: str, result: dict) -> str:
     if name == "retrieve_similar_posts":
         n = result.get("count", 0)
         return f"Retrieved {n} similar posts for style reference"
+    if name == "find_linkedin_profiles":
+        count = result.get("count", 0)
+        if count == 0:
+            return "No LinkedIn profile found"
+        if count == 1:
+            return f"Found: {result['candidates'][0]['url']}"
+        return f"{count} candidates — user selection needed"
     if name == "search_images":
         n = result.get("count", 0)
         return f"Found {n} building photos"

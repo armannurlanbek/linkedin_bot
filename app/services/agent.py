@@ -108,17 +108,31 @@ def _build_system() -> list:
   2. search_web — שם הבניין + עיר + developer contractor architect facade (וגם בעברית)
   3. search_images — שם הבניין + עיר + "exterior facade"
   4. retrieve_similar_posts
-  5. כתוב את הפוסט — STOP, אין כלים נוספים אחרי זה!
+  5. find_linkedin_profiles — לכל חברה/ספק/קבלן/יזם שתזכיר בפוסט (ראה כללים מטה)
+  6. כתוב את הפוסט — STOP, אין כלים נוספים אחרי זה!
 
 אם הקלט הוא מסמך, רעיון, או נושא שאינו בניין ספציפי עם URL:
   1. retrieve_similar_posts — למצוא סגנון דומה
   2. search_web — אם צריך עובדות נוספות שאינן בחומר שסופק (אופציונלי)
-  3. כתוב את הפוסט (search_images לא רלוונטי במקרה זה)
+  3. find_linkedin_profiles — לכל חברה שתזכיר (אם רלוונטי)
+  4. כתוב את הפוסט (search_images לא רלוונטי במקרה זה)
 
 חוקים:
 - תיקון / שינוי → כתוב מחדש מהזיכרון, ללא כלים בכלל
-- URL נוסף → חזור על 4 השלבים מהתחלה
-- אסור לקרוא לכלים אחרי שהתחלת לכתוב את הפוסט"""
+- URL נוסף → חזור על השלבים מהתחלה
+- אסור לקרוא לכלים אחרי שהתחלת לכתוב את הפוסט
+
+════ @mention לחברה ראשית (find_linkedin_profiles) ════
+לפני כתיבת הפוסט, קרא ל-find_linkedin_profiles פעם אחת בלבד — עבור החברה החשובה ביותר בפוסט.
+סדר עדיפויות: יזם (developer) > קבלן ראשי (main contractor) > אדריכל > קבלן מעטפת.
+אם אף אחד מאלה לא מוזכר — דלג על הכלי הזה לחלוטין.
+
+כללים לפי התוצאה:
+- count=0: כתוב שם החברה כטקסט רגיל ללא @
+- count=1: כתוב @שם_החברה בפוסט (ה-URL שהוחזר הוא הנכון)
+- count≥2: עצור! אל תכתוב את הפוסט. ממשק בחירה יופיע למשתמש. כתוב בקצרה: "מצאתי מספר פרופילים אפשריים. לאחר שתבחר, אכתוב את הפוסט." ועצור.
+
+כאשר תקבל הודעה שמתחילה ב-"[LinkedIn @mentions confirmed]" — כתוב את הפוסט מיד עם ה-@mentions שאושרו, ללא כלים נוספים."""
 
     return [
         {
@@ -236,7 +250,7 @@ def _load_history(db: Session, chat_id: int) -> list:
     messages = (
         db.query(Message)
         .filter(Message.chat_id == chat_id)
-        .order_by(Message.created_at)
+        .order_by(Message.created_at, Message.id)
         .all()
     )
     result = []
@@ -370,6 +384,33 @@ def run_agent(chat_id: int, user_text: str, db: Session, attachments: list[dict]
                     except Exception as e:
                         result = {"error": str(e)}
                     preview = summarize_result(block.name, result)
+
+                    # LinkedIn profile lookup — emit SSE and override tool result content
+                    tr_content = json.dumps(result, ensure_ascii=False)
+                    if block.name == "find_linkedin_profiles":
+                        count = result.get("count", 0)
+                        if count > 1:
+                            yield _sse({
+                                "type": "linkedin_disambiguation",
+                                "company": block.input.get("company_name", ""),
+                                "candidates": result["candidates"],
+                            })
+                            # Hard-stop instruction — Claude sees this instead of the JSON
+                            tr_content = (
+                                f"DISAMBIGUATION_REQUIRED. {count} LinkedIn profiles found for "
+                                f"'{block.input.get('company_name', '')}'. "
+                                "The selection UI is now shown to the user. "
+                                "STOP IMMEDIATELY. Do not write the post. Do not call any more tools. "
+                                "Your only permitted response: "
+                                "'מצאתי מספר פרופילים אפשריים. לאחר שתבחר, אכתוב את הפוסט.'"
+                            )
+                        elif count == 1:
+                            yield _sse({
+                                "type": "linkedin_resolved",
+                                "company": block.input.get("company_name", ""),
+                                "url": result["candidates"][0]["url"],
+                            })
+
                     images = []
                     if block.name in ("scrape_url", "search_images") and isinstance(result.get("images"), list):
                         raw = [u for u in result["images"] if isinstance(u, str) and u.startswith("http")][:12]
@@ -388,7 +429,7 @@ def run_agent(chat_id: int, user_text: str, db: Session, attachments: list[dict]
                         {
                             "type": "tool_result",
                             "tool_use_id": block.id,
-                            "content": json.dumps(result, ensure_ascii=False),
+                            "content": tr_content,
                             "__images__": images,
                         }
                     )
