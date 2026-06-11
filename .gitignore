@@ -26,10 +26,15 @@ Thumbs.db
 # Server & infrastructure docs (sensitive)
 SERVER.md
 n8n Server - Orlanda Handbook (2).md
+Roman's Platform Guide.md
+
+# Local working notes
+PROJECT-STATE.md
 
 # Raw / unprocessed assets
 ORLANDA logo*.png
 
 # Conversation / session logs
 claude_linkedin_bot_conversation.txt
+last_conversation.txt
 DEPLOY.md
