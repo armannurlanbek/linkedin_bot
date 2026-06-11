@@ -100,7 +100,7 @@ def search_images(query: str) -> list[str]:
             "logo", "icon", "avatar", "profile", "favicon",
             "pixel", "track", "sprite", "banner", "badge", "placeholder",
             "thumbnail", "thumb", "mini", "tiny", "small",
-            "facebook.com", "twitter.com", "instagram.com", "linkedin.com",
+            "facebook.com", "twitter.com", "instagram.com", "linkedin.com", "licdn.com",
             "gravatar.com", "wp-content/uploads/avatars",
             ".gif",
             # Query-string size hints from CDNs

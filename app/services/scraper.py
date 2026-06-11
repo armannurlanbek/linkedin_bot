@@ -14,8 +14,12 @@ HEADERS = {
     )
 }
 
+# `licdn`/`linkedin` filter out LinkedIn CDN assets — when a logged-out LinkedIn
+# post/company URL is scraped, its og:image is the publisher's static company
+# *cover*, not the post photo, so it would otherwise recur for every post from
+# that page (e.g. media.licdn.com/.../company-background.../<page>_cover).
 _SKIP_PATTERNS = re.compile(
-    r"(logo|icon|favicon|sprite|avatar|thumb|pixel|badge|banner|placeholder|blank|gif)",
+    r"(logo|icon|favicon|sprite|avatar|thumb|pixel|badge|banner|placeholder|blank|gif|licdn|linkedin)",
     re.IGNORECASE,
 )
 
