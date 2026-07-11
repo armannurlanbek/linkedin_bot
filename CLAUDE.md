@@ -30,6 +30,12 @@ Local dev without Docker: uncomment `DATABASE_URL_SYNC` / `DATABASE_URL` in `.en
 
 There is **no test suite** and no linter configured. For a fast sanity check after editing Python, use `python -m py_compile <files>`.
 
+Importing any `app.*` module instantiates `app.config.Settings()` at import time, which **requires** `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `DATABASE_URL`, `DATABASE_URL_SYNC` to be present (env or `.env`) or it raises immediately. To unit-test a pure helper outside Docker (e.g. a scraper/search filter) without real secrets, set dummy values first — the helpers don't touch the DB or APIs:
+
+```bash
+ANTHROPIC_API_KEY=x OPENAI_API_KEY=x DATABASE_URL=postgresql://x DATABASE_URL_SYNC=postgresql://x python your_test.py
+```
+
 ## Secrets & config
 
 Secrets live in `.env` (gitignored; see `.env.example`). The database URLs are **assembled in `docker-compose.yml`** from `DB_PASSWORD` — `.env` only holds the password, not the full URL (when running in Docker). Required keys: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` (embeddings + Whisper). `TAVILY_API_KEY` is optional — every Tavily-backed tool degrades to an empty result if it's missing. `APP_PASSWORD` empty disables the auth gate entirely.
@@ -53,7 +59,7 @@ The system prompt is a single big block built in `_build_system()` and marked wi
 Messages are ordered by **`(created_at, id)`** in both `_load_history` and `get_chat`. The `id` tiebreaker is load-bearing: equal timestamps under rapid tool loops could otherwise invert a `tool_use`/`tool_result` pair and 400 the API. Keep both order clauses in sync.
 
 ### Tools — `app/services/tools.py` (schemas + `execute_tool` dispatcher)
-- `scrape_url` → `scraper.py`: httpx first, then Tavily *extract*, then Tavily *search* index as fallback; social/login-walled domains go straight to Tavily.
+- `scrape_url` → `scraper.py`: httpx first, then Tavily *extract*, then Tavily *search* index as fallback; social/login-walled domains go straight to Tavily. Extracted images come from `og:image`/`<img>` tags filtered by `_SKIP_PATTERNS`. Trap: LinkedIn is *not* in the login-wall list, so a logged-out LinkedIn URL is scraped directly and its `og:image` resolves to the **publisher's company cover** (`media.licdn.com/.../company-background`), not the post's photo — which is why `_SKIP_PATTERNS` drops `licdn`/`linkedin` assets. Match that CDN host (`licdn.com`), not just `linkedin.com`, when filtering LinkedIn images anywhere.
 - `search_web`, `find_linkedin_profiles`, `search_images` → `search.py` (all Tavily).
 - `retrieve_similar_posts` → `retrieval.py`: OpenAI `text-embedding-3-small` + pgvector cosine distance over the `posts` table.
 
