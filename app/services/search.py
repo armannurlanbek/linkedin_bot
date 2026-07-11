@@ -81,8 +81,91 @@ def find_linkedin_profiles(company_name: str) -> dict:
         return {"candidates": [], "count": 0}
 
 
+# ── Image ranking for search_images ────────────────────────────────────────────
+# URL substrings that mean "not a real building photo": junk assets, social CDNs,
+# and (at the bottom) stock/clipart/community sites that reliably return off-topic
+# images (e.g. Pixabay/PublicDomainPictures/catpedia cats). Dropped outright.
+_IMG_SKIP_URL = (
+    "logo", "icon", "avatar", "profile", "favicon",
+    "pixel", "track", "sprite", "banner", "badge", "placeholder",
+    "thumbnail", "thumb", "mini", "tiny", "small",
+    "facebook.com", "twitter.com", "instagram.com", "linkedin.com", "licdn.com",
+    "fbsbx.com", "lookaside", "gravatar.com", "wp-content/uploads/avatars",
+    ".gif",
+    # Stock / clipart / community image sites — high junk rate, low building relevance
+    "pixabay", "publicdomainpictures", "pinterest", "pinimg", "etsy",
+    "shutterstock", "dreamstime", "123rf", "freepik", "vecteezy",
+    "getdrawings", "catpedia",
+    # Query-string size hints from CDNs
+    "w=50", "w=100", "w=150", "w=200", "w=250", "w=300",
+    "width=50", "width=100", "width=150", "width=200", "width=300",
+    "size=sm", "size=xs", "size=small",
+    "format=thumbnail",
+)
+
+_PREFER_DOMAINS = (
+    "archdaily", "dezeen", "architecturaldigest", "archello",
+    "wikimedia", "wikipedia", "e-architect", "world-architects",
+    "archpaper", "architizer", "architectural-review",
+    "structurae", "skyscrapercity", "ctbuh", "archmarathon",
+    "emporis", "archnet", "metalocus", "uncubemagazine",
+)
+
+# Tavily returns an AI-generated description per image. DENY-ONLY: an image is
+# dropped only when its description positively names a non-building subject
+# (cats/animals/clipart). Word boundaries avoid false hits like "cathedral" or
+# "located". An image with NO description is NEVER dropped by this check.
+_DESC_DENY_RE = re.compile(
+    r"\b(cats?|kittens?|kitty|feline|siamese|dogs?|pupp(?:y|ies)|canine|"
+    r"animals?|pets?|wildlife|bird|horse|cartoon|clip[\s-]*art)\b",
+    re.IGNORECASE,
+)
+# Description terms that confirm an on-subject building image — rank it up.
+_DESC_PREFER = (
+    "building", "skyscraper", "tower", "facade", "faade", "architect",
+    "skyline", "high-rise", "highrise", "observation deck", "glass",
+    "structure", "construction", "rooftop", "cityscape", "city",
+)
+
+
+def _rank_images(items: list[tuple[str, str]]) -> list[str]:
+    """Score (url, description) pairs and return up to 8 building-image URLs.
+
+    Layers: junk/stock URL denylist; small-dimension guard; deny-only description
+    filter (missing description never drops an image); and a boost for
+    architecture domains and on-subject descriptions.
+    """
+    def _score(url: str, desc: str) -> int:
+        ul = url.lower()
+        if any(p in ul for p in _IMG_SKIP_URL):
+            return -1
+        # Filter URLs with explicit small dimensions, e.g. image-320x240.jpg
+        m = _small_dim.search(ul)
+        if m:
+            w, h = int(m.group(1)), int(m.group(2))
+            if w < 600 or h < 400:
+                return -1
+        d = (desc or "").lower()
+        if d and _DESC_DENY_RE.search(d):
+            return -1  # description names a cat/animal/etc. — not a building
+        score = 0
+        if any(pd in ul for pd in _PREFER_DOMAINS):
+            score += 2
+        if d and any(t in d for t in _DESC_PREFER):
+            score += 2
+        return score or 1  # no positive signal → neutral keep (never dropped)
+
+    scored = [(u, _score(u, desc)) for (u, desc) in items if isinstance(u, str) and u.startswith("http")]
+    return [u for u, s in sorted(scored, key=lambda x: -x[1]) if s >= 0][:8]
+
+
 def search_images(query: str) -> list[str]:
-    """Search for building/architecture images using Tavily's image search."""
+    """Search for building/architecture images using Tavily's image search.
+
+    Requests Tavily's per-image descriptions so `_rank_images` can drop off-topic
+    results (e.g. the stock-photo cats that generic 'professional photography'
+    queries sometimes surface) while keeping images that have no description.
+    """
     if not settings.tavily_api_key:
         return []
     try:
@@ -92,48 +175,15 @@ def search_images(query: str) -> list[str]:
             query=query,
             search_depth="advanced",
             include_images=True,
+            include_image_descriptions=True,
             max_results=15,
         )
-        images = response.get("images", [])
-
-        _skip_patterns = (
-            "logo", "icon", "avatar", "profile", "favicon",
-            "pixel", "track", "sprite", "banner", "badge", "placeholder",
-            "thumbnail", "thumb", "mini", "tiny", "small",
-            "facebook.com", "twitter.com", "instagram.com", "linkedin.com", "licdn.com",
-            "gravatar.com", "wp-content/uploads/avatars",
-            ".gif",
-            # Query-string size hints from CDNs
-            "w=50", "w=100", "w=150", "w=200", "w=250", "w=300",
-            "width=50", "width=100", "width=150", "width=200", "width=300",
-            "size=sm", "size=xs", "size=small",
-            "format=thumbnail",
-        )
-
-        _prefer_domains = (
-            "archdaily", "dezeen", "architecturaldigest", "archello",
-            "wikimedia", "wikipedia", "e-architect", "world-architects",
-            "archpaper", "architizer", "architectural-review",
-            "structurae", "skyscrapercity", "ctbuh", "archmarathon",
-            "emporis", "archnet", "metalocus", "uncubemagazine",
-        )
-
-        def _score(u: str) -> int:
-            ul = u.lower()
-            if any(p in ul for p in _skip_patterns):
-                return -1
-            # Filter URLs with explicit small dimensions, e.g. image-320x240.jpg
-            m = _small_dim.search(ul)
-            if m:
-                w, h = int(m.group(1)), int(m.group(2))
-                if w < 600 or h < 400:
-                    return -1
-            if any(d in ul for d in _prefer_domains):
-                return 2
-            return 1
-
-        scored = [(u, _score(u)) for u in images if isinstance(u, str) and u.startswith("http")]
-        filtered = [u for u, s in sorted(scored, key=lambda x: -x[1]) if s >= 0]
-        return filtered[:8]
+        items: list[tuple[str, str]] = []
+        for im in response.get("images", []):
+            if isinstance(im, dict):
+                items.append((im.get("url", "") or "", im.get("description") or ""))
+            elif isinstance(im, str):
+                items.append((im, ""))
+        return _rank_images(items)
     except Exception:
         return []
