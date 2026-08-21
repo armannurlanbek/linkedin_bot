@@ -28,6 +28,101 @@ def _is_photo(url: str) -> bool:
     return bool(url.startswith("http")) and not _SKIP_PATTERNS.search(url)
 
 
+# ── Instagram / Facebook post handling ────────────────────────────────────────
+# Share sheets append tracking params, and they make Tavily's fetch fail outright
+# at basic depth. Measured against a live public post:
+#   .../p/<code>                 → OK   (10,835 chars)
+#   .../p/<code>/?igsh=...       → FAIL ("Error fetching content")
+#   .../p/<code>/?img_index=1    → FAIL ("Error fetching content")
+#   instagram.com (no www)       → OK   but only 1,412 chars
+# Stripping them first removes a whole class of "sometimes it just doesn't work".
+_TRACKING_PARAMS = {
+    "igsh", "igshid", "img_index", "fbclid", "mibextid", "rdid", "share_url",
+    "si", "ref", "source", "utm_source", "utm_medium", "utm_campaign",
+}
+
+_HOST_ALIASES = {
+    "m.facebook.com": "www.facebook.com",
+    "web.facebook.com": "www.facebook.com",
+    "l.facebook.com": "www.facebook.com",
+    "fb.com": "www.facebook.com",
+    "www.fb.com": "www.facebook.com",
+    "instagram.com": "www.instagram.com",
+    "m.instagram.com": "www.instagram.com",
+}
+
+
+def _normalize_social_url(url: str) -> str:
+    """Canonicalise an Instagram/Facebook URL before handing it to Tavily."""
+    from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+
+    try:
+        parts = urlparse(url)
+    except Exception:
+        return url
+    if not parts.netloc:
+        return url  # not a real URL — hand it back untouched rather than mangle it
+    host = parts.netloc.lower()
+    host = _HOST_ALIASES.get(host, host)
+    kept = [(k, v) for k, v in parse_qsl(parts.query) if k.lower() not in _TRACKING_PARAMS]
+    return urlunparse(
+        (parts.scheme or "https", host, parts.path, parts.params, urlencode(kept), "")
+    )
+
+
+# Instagram serves the poster's avatar from the t51.2885-19 bucket and the post's
+# own photos from t51.82787-15 / t51.2885-15. The avatar arrives FIRST in Tavily's
+# list, and agent.py uses images[0] as the chat thumbnail — so without this the
+# sidebar would show the account's profile picture instead of the building.
+_IG_AVATAR_BUCKET = "t51.2885-19"
+
+# lookaside.instagram.com/seo/google_widget/crawler/ is Instagram's crawler
+# endpoint; it surfaces unrelated media and is not the post's photo.
+_SOCIAL_IMG_SKIP = ("lookaside.", "/seo/google_widget/", "profile_pic", "/rsrc.php/")
+
+# Instagram/Facebook encode the rendered size in the stp param, e.g.
+# "dst-jpg_s150x150_tt6" (an avatar) or "dst-jpg_e35_s640x640_tt6" (a real post
+# photo). Match the DIMENSIONS, not the surrounding letters — "e35" is a standard
+# transform code, so a substring rule on "_e35_s" silently discards every 640x640
+# photo. A URL with no size marker is full-size and is always kept.
+_SOCIAL_SIZE_RE = re.compile(r"[_-][sp](\d{2,4})x(\d{2,4})")
+_MIN_SOCIAL_DIM = 500
+
+
+def _is_small_social_image(url: str) -> bool:
+    match = _SOCIAL_SIZE_RE.search(url)
+    if not match:
+        return False
+    return int(match.group(1)) < _MIN_SOCIAL_DIM or int(match.group(2)) < _MIN_SOCIAL_DIM
+
+
+def _social_images(raw: list | None, limit: int = 12) -> list[str]:
+    """Pick the post's own photos out of Tavily's image list, in order."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in raw or []:
+        if isinstance(item, str):
+            candidate = item
+        elif isinstance(item, dict):
+            candidate = item.get("url") or ""
+        else:
+            continue
+        if not candidate.startswith("http") or candidate in seen:
+            continue
+        low = candidate.lower()
+        if _IG_AVATAR_BUCKET in low:
+            continue
+        if any(s in low for s in _SOCIAL_IMG_SKIP):
+            continue
+        if _is_small_social_image(low):
+            continue
+        seen.add(candidate)
+        out.append(candidate)
+        if len(out) >= limit:
+            break
+    return out
+
+
 def _parse_html(html: str, url: str) -> dict:
     """Parse raw HTML into {title, text, images, url}."""
     soup = BeautifulSoup(html, "html.parser")
@@ -70,14 +165,23 @@ def _parse_html(html: str, url: str) -> dict:
     return {"title": title.strip(), "text": text.strip(), "images": images, "url": url}
 
 
-def _tavily_extract(url: str) -> dict | None:
-    """Use Tavily's extract API to get content from JS-heavy or login-walled pages."""
+def _tavily_extract(url: str, *, depth: str = "basic", with_images: bool = False) -> dict | None:
+    """Use Tavily's extract API to get content from JS-heavy or login-walled pages.
+
+    depth="advanced" is markedly more capable on social permalinks (measured: it
+    rescues URLs that fail outright at basic depth, and returned 8,886 chars where
+    basic returned 1,412). with_images asks Tavily for the page's images — without
+    it the response carries none at all, which is why social posts never had any.
+    """
     if not settings.tavily_api_key:
         return None
     try:
         from tavily import TavilyClient
         client = TavilyClient(api_key=settings.tavily_api_key)
-        resp = client.extract(urls=[url])
+        kwargs: dict = {"extract_depth": depth}
+        if with_images:
+            kwargs["include_images"] = True
+        resp = client.extract(urls=[url], **kwargs)
         results = resp.get("results", [])
         if not results:
             return None
@@ -85,12 +189,16 @@ def _tavily_extract(url: str) -> dict | None:
         raw_content = r.get("raw_content") or r.get("content") or ""
         if not raw_content:
             return None
+        images = _social_images(r.get("images")) if with_images else []
         if "<html" in raw_content[:200].lower() or "<body" in raw_content[:200].lower():
-            return _parse_html(raw_content, url)
+            parsed = _parse_html(raw_content, url)
+            if images and not parsed["images"]:
+                parsed["images"] = images
+            return parsed
         return {
             "title": "",
             "text": raw_content.strip(),
-            "images": [],
+            "images": images,
             "url": url,
         }
     except Exception:
@@ -122,6 +230,10 @@ def _tavily_search(url: str) -> dict | None:
             return _parse_html(content, url)
         return {
             "title": best.get("title", ""),
+            # Deliberately no images: the search index returns photos belonging to
+            # OTHER results for the same query (measured: a Facebook post query
+            # returned lookaside.instagram.com crawler URLs from unrelated pages),
+            # so they cannot be trusted to be this post's own photos.
             "text": content.strip(),
             "images": [],
             "url": url,
@@ -136,6 +248,22 @@ _LOGIN_WALL_DOMAINS = (
 )
 
 _LOGIN_WALL_PATTERNS = ("login", "signin", "sign-in", "auth/", "checkpoint")
+
+_PLATFORM_NAMES = {
+    "instagram.com": "Instagram",
+    "facebook.com": "Facebook",
+    "fb.com": "Facebook",
+    "tiktok.com": "TikTok",
+    "twitter.com": "X",
+    "x.com": "X",
+}
+
+
+def _platform_name(host: str) -> str:
+    for domain, label in _PLATFORM_NAMES.items():
+        if host == domain or host.endswith("." + domain):
+            return label
+    return "social media"
 
 
 def _is_login_wall(final_url: str) -> bool:
@@ -153,14 +281,34 @@ def scrape(url: str) -> dict:
 
     # Social platforms: go straight to Tavily (httpx always gets login walls)
     if is_social:
-        tavily_result = _tavily_extract(url)
-        if tavily_result and len(tavily_result.get("text", "")) >= 50:
-            return tavily_result
-        # Extract failed or returned too little — try search index as fallback
-        search_result = _tavily_search(url)
+        target = _normalize_social_url(url)
+
+        # Three attempts, each a DIFFERENT strategy rather than the same call
+        # repeated. Repeating an identical failing extract was measured at 3
+        # failures out of 3 attempts, ~6.7s each — blind retries buy only latency.
+        # These three fail independently, so a later one can rescue an earlier one.
+        for depth, with_images in (("advanced", True), ("basic", False)):
+            tavily_result = _tavily_extract(target, depth=depth, with_images=with_images)
+            if tavily_result and len(tavily_result.get("text", "")) >= 50:
+                return tavily_result
+
+        search_result = _tavily_search(target)
         if search_result and len(search_result.get("text", "")) >= 50:
             return search_result
-        return {"title": "", "text": "Could not extract content — the post may be private or require login.", "images": [], "url": url}
+
+        return {
+            "title": "",
+            "text": (
+                f"Could not read this {_platform_name(host)} post. It may be private or "
+                f"deleted, or {_platform_name(host)} is currently blocking automated "
+                "access (this often clears up after a few minutes). Do NOT guess or "
+                "invent what the post said. Tell the user the post could not be read, "
+                "and ask them to paste its text into the chat (and attach the photo) "
+                "so you can write from that."
+            ),
+            "images": [],
+            "url": url,
+        }
 
     # All other URLs: try httpx first
     result = None
