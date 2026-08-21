@@ -96,6 +96,18 @@ def _is_small_social_image(url: str) -> bool:
     return int(match.group(1)) < _MIN_SOCIAL_DIM or int(match.group(2)) < _MIN_SOCIAL_DIM
 
 
+def _media_key(url: str) -> str:
+    """Identity of the underlying photo, independent of which CDN edge served it.
+
+    Instagram returns the same media from several hosts (scontent.cdninstagram.com
+    and instagram.<pop>.fna.fbcdn.net), so deduping on the full URL shows the same
+    picture twice in the grid. The filename carries the media id and is stable.
+    """
+    path = url.split("?", 1)[0]
+    name = path.rsplit("/", 1)[-1]
+    return name.lower() or url.lower()
+
+
 def _social_images(raw: list | None, limit: int = 12) -> list[str]:
     """Pick the post's own photos out of Tavily's image list, in order."""
     out: list[str] = []
@@ -107,7 +119,10 @@ def _social_images(raw: list | None, limit: int = 12) -> list[str]:
             candidate = item.get("url") or ""
         else:
             continue
-        if not candidate.startswith("http") or candidate in seen:
+        if not candidate.startswith("http"):
+            continue
+        key = _media_key(candidate)
+        if key in seen:
             continue
         low = candidate.lower()
         if _IG_AVATAR_BUCKET in low:
@@ -116,7 +131,7 @@ def _social_images(raw: list | None, limit: int = 12) -> list[str]:
             continue
         if _is_small_social_image(low):
             continue
-        seen.add(candidate)
+        seen.add(key)
         out.append(candidate)
         if len(out) >= limit:
             break
@@ -296,13 +311,26 @@ def scrape(url: str) -> dict:
         if search_result and len(search_result.get("text", "")) >= 50:
             return search_result
 
+        platform = _platform_name(host)
         return {
             "title": "",
+            # Lead with the temporary block, not "private": measured, the common
+            # cause is the platform throttling automated access, and a later attempt
+            # frequently succeeds on the very same URL. Saying "private" first made
+            # Claude report a transient failure to the user as a permanent fact.
+            # The retry is delegated to the agent loop rather than a sleep() here —
+            # retrying inside one request at 8s/28s/73s did not recover extraction,
+            # while a retry a chat-turn later did.
             "text": (
-                f"Could not read this {_platform_name(host)} post. It may be private or "
-                f"deleted, or {_platform_name(host)} is currently blocking automated "
-                "access (this often clears up after a few minutes). Do NOT guess or "
-                "invent what the post said. Tell the user the post could not be read, "
+                f"Could not read this {platform} post on this attempt. Most often "
+                f"{platform} is temporarily blocking automated access, and the same "
+                "URL succeeds when tried again a moment later. Less often the post is "
+                "private or deleted.\n\n"
+                "If you have NOT already retried this exact URL in this conversation, "
+                "call scrape_url once more with the same URL now.\n\n"
+                "If you HAVE already retried it, stop retrying. Do NOT guess or invent "
+                "what the post said, and do NOT state that the post is private — you "
+                "do not know that. Tell the user the post could not be read this time, "
                 "and ask them to paste its text into the chat (and attach the photo) "
                 "so you can write from that."
             ),
