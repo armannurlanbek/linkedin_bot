@@ -184,22 +184,29 @@ def _sanitize_block(block: dict) -> dict:
     return block
 
 
+def _block_type(b):
+    return b.get("type") if isinstance(b, dict) else getattr(b, "type", None)
+
+
+def _block_id(b):
+    return b.get("id") if isinstance(b, dict) else getattr(b, "id", None)
+
+
+def _block_tool_use_id(b):
+    return b.get("tool_use_id") if isinstance(b, dict) else getattr(b, "tool_use_id", None)
+
+
 def _repair_tool_pairs(history: list) -> list:
     """Ensure every tool_use block has a matching tool_result in the next message.
 
     If the tool_result message was never saved (e.g. due to a DB error), the API
     rejects the history with a 400.  We inject synthetic tool_results so the
     conversation can continue cleanly.
+
+    This handles only one direction of the API's pairing rule. The other direction
+    — a tool_result with no tool_use before it — is handled by
+    _drop_orphan_tool_results, which must run after this pass.
     """
-    def _block_type(b):
-        return b.get("type") if isinstance(b, dict) else getattr(b, "type", None)
-
-    def _block_id(b):
-        return b.get("id") if isinstance(b, dict) else getattr(b, "id", None)
-
-    def _block_tool_use_id(b):
-        return b.get("tool_use_id") if isinstance(b, dict) else getattr(b, "tool_use_id", None)
-
     out = []
     i = 0
     while i < len(history):
@@ -246,6 +253,49 @@ def _repair_tool_pairs(history: list) -> list:
     return out
 
 
+def _drop_orphan_tool_results(history: list) -> list:
+    """Drop tool_result blocks whose tool_use is not in the immediately preceding message.
+
+    The API requires this in both directions, and a tool_result with no matching
+    tool_use is a hard 400 ("unexpected `tool_use_id` found in `tool_result`
+    blocks"). It happens when two agent turns run on the same chat at once — the
+    frontend clears its streaming lock when a connection drops, but the backend
+    worker deliberately keeps running, so a message sent at that moment starts a
+    second worker. The two turns then interleave their writes and a turn's results
+    land several messages after its own tool_use blocks.
+
+    Without this pass the bad history is replayed on every subsequent request and
+    the chat 400s forever. Must run AFTER _repair_tool_pairs, so that the synthetic
+    results that pass injects are already in place and are not mistaken for orphans.
+    """
+    out: list = []
+    prev_use_ids: set = set()
+    for msg in history:
+        content = msg.get("content")
+        if not isinstance(content, list):
+            out.append(msg)
+            prev_use_ids = set()
+            continue
+
+        kept = [
+            b for b in content
+            if _block_type(b) != "tool_result" or _block_tool_use_id(b) in prev_use_ids
+        ]
+        if not kept:
+            # The message carried nothing but orphans. Drop it whole rather than
+            # send empty content (also a 400), and leave prev_use_ids untouched so
+            # the next message is checked against the message that now precedes it.
+            continue
+
+        this_use_ids = {
+            _block_id(b) for b in content
+            if _block_type(b) == "tool_use" and _block_id(b)
+        }
+        out.append(msg if len(kept) == len(content) else {"role": msg["role"], "content": kept})
+        prev_use_ids = this_use_ids
+    return out
+
+
 def _load_history(db: Session, chat_id: int) -> list:
     messages = (
         db.query(Message)
@@ -273,7 +323,7 @@ def _load_history(db: Session, chat_id: int) -> list:
             else:
                 content = sanitized
         result.append({"role": m.role, "content": content})
-    return _repair_tool_pairs(result)
+    return _drop_orphan_tool_results(_repair_tool_pairs(result))
 
 
 def _generate_title(user_text: str) -> str:
