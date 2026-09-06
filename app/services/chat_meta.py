@@ -130,6 +130,8 @@ _COVER_SKIP = (
     "vecteezy", "pixabay", "publicdomainpictures", "getdrawings",
     "pinimg", "pinterest", "etsy",
     "clipart", "/logo", "logo.", "favicon", "sprite", "placeholder", "avatar",
+    # Facebook's crawler endpoint answers 200 with a non-image body.
+    "lookaside", "fbsbx.com",
 )
 
 
@@ -162,6 +164,42 @@ def _title_tokens(title: str | None) -> list[str]:
     ]
 
 
+def iter_cover_candidates(by_tool: dict[str, list[str]], title: str | None = None):
+    """Yield cover candidates best-first, so a caller can skip ones that 404."""
+    seen: set[str] = set()
+
+    def _emit(url):
+        if url in seen:
+            return False
+        seen.add(url)
+        return True
+
+    ordered = list(IMAGE_TOOL_PRIORITY) + [
+        t for t in by_tool if t not in IMAGE_TOOL_PRIORITY
+    ]
+    usable = [
+        (tool, url) for tool in ordered
+        for url in (by_tool.get(tool) or []) if _usable_cover(url)
+    ]
+    direct = [(t, u) for t, u in usable
+              if not any(h in u.lower() for h in _WRAPPER_HINTS)]
+
+    tokens = _title_tokens(title)
+    if tokens:
+        for _, url in direct:
+            if any(token in url.lower() for token in tokens) and _emit(url):
+                yield url
+
+    for _, url in direct:
+        if _emit(url):
+            yield url
+
+    # A wrapper is still better than no cover, but only once nothing direct is left.
+    for _, url in usable:
+        if _emit(url):
+            yield url
+
+
 def pick_thumbnail(by_tool: dict[str, list[str]], title: str | None = None) -> str | None:
     """Choose the cover image for a post.
 
@@ -176,34 +214,7 @@ def pick_thumbnail(by_tool: dict[str, list[str]], title: str | None = None) -> s
     search.py::_rank_images, whereas scrape_url returns whatever the source page
     carried — a publisher cover or an unrelated illustration.
     """
-    ordered = list(IMAGE_TOOL_PRIORITY) + [
-        t for t in by_tool if t not in IMAGE_TOOL_PRIORITY
-    ]
-
-    tokens = _title_tokens(title)
-    if tokens:
-        for tool in ordered:
-            for url in by_tool.get(tool) or []:
-                if not _usable_cover(url):
-                    continue
-                low = url.lower()
-                if any(hint in low for hint in _WRAPPER_HINTS):
-                    continue
-                if any(token in low for token in tokens):
-                    return url
-
-    # A wrapper is still better than no cover at all, so it is held back rather
-    # than dropped, and used only if nothing direct turns up.
-    wrapper: str | None = None
-    for tool in ordered:
-        for url in by_tool.get(tool) or []:
-            if not _usable_cover(url):
-                continue
-            if any(hint in url.lower() for hint in _WRAPPER_HINTS):
-                wrapper = wrapper or url
-                continue
-            return url
-    return wrapper
+    return next(iter_cover_candidates(by_tool, title), None)
 
 
 _TITLE_PROMPT = """להלן פוסט מוכן. תן לו שם קצר לרשימת השיחות.
