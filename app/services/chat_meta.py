@@ -140,16 +140,70 @@ def _usable_cover(url) -> bool:
     return not any(bad in low for bad in _COVER_SKIP)
 
 
-def pick_thumbnail(by_tool: dict[str, list[str]]) -> str | None:
-    """Choose the cover image: the subject-searched photo before the scraped one."""
+# Generic words shared by half the archive — matching on them would pair a post
+# with any tower, so they carry no evidence about *which* building this is.
+_TITLE_STOPWORDS = {
+    "the", "and", "of", "tower", "towers", "center", "centre", "building",
+    "city", "house", "hotel", "museum", "plaza", "park", "station",
+    "design", "group", "international", "project", "headquarters",
+}
+
+_LATIN_WORD_RE = re.compile(r"[A-Za-z]{4,}")
+
+# A URL that carries another URL inside it (a CDN resizer or a redirect) is a
+# wrapper, not the image itself — poor evidence and a poor cover.
+_WRAPPER_HINTS = ("url=", "%3a%2f%2f")
+
+
+def _title_tokens(title: str | None) -> list[str]:
+    return [
+        w.lower() for w in _LATIN_WORD_RE.findall(title or "")
+        if w.lower() not in _TITLE_STOPWORDS
+    ]
+
+
+def pick_thumbnail(by_tool: dict[str, list[str]], title: str | None = None) -> str | None:
+    """Choose the cover image for a post.
+
+    Two passes. First, any candidate whose URL names the building the post is
+    about — publishers put the project's name in the filename, so this is direct
+    evidence and it beats tool order. It matters because a conversation that
+    touched more than one building can leave search_images results for the
+    *other* one at the front of the queue.
+
+    Failing that, tool order: the subject-searched photo before the scraped one.
+    search_images is queried with the building's name and ranked in
+    search.py::_rank_images, whereas scrape_url returns whatever the source page
+    carried — a publisher cover or an unrelated illustration.
+    """
     ordered = list(IMAGE_TOOL_PRIORITY) + [
         t for t in by_tool if t not in IMAGE_TOOL_PRIORITY
     ]
+
+    tokens = _title_tokens(title)
+    if tokens:
+        for tool in ordered:
+            for url in by_tool.get(tool) or []:
+                if not _usable_cover(url):
+                    continue
+                low = url.lower()
+                if any(hint in low for hint in _WRAPPER_HINTS):
+                    continue
+                if any(token in low for token in tokens):
+                    return url
+
+    # A wrapper is still better than no cover at all, so it is held back rather
+    # than dropped, and used only if nothing direct turns up.
+    wrapper: str | None = None
     for tool in ordered:
         for url in by_tool.get(tool) or []:
-            if _usable_cover(url):
-                return url
-    return None
+            if not _usable_cover(url):
+                continue
+            if any(hint in url.lower() for hint in _WRAPPER_HINTS):
+                wrapper = wrapper or url
+                continue
+            return url
+    return wrapper
 
 
 _TITLE_PROMPT = """להלן פוסט מוכן. תן לו שם קצר לרשימת השיחות.
@@ -256,6 +310,9 @@ def finalize_chat_meta(db, chat_id: int, post_text: str, by_tool: dict[str, list
         title_source, thumbnail_source = row[0] or "auto", row[1]
 
         updates: dict = {}
+        effective_title = db.execute(
+            text("SELECT title FROM chats WHERE id = :id"), {"id": chat_id}
+        ).scalar()
 
         # A title the user typed, or one already derived from this post, stands.
         if title_source == "auto":
@@ -263,12 +320,13 @@ def finalize_chat_meta(db, chat_id: int, post_text: str, by_tool: dict[str, list
             if title:
                 updates["title"] = title
                 updates["title_source"] = "post"
+                effective_title = title
                 events.append({"type": "title", "title": title})
 
         # A cover the user chose stands. A mid-run placeholder gets upgraded.
         if thumbnail_source != "manual":
             candidates = by_tool or candidates_from_db(db, chat_id)
-            url = pick_thumbnail(candidates)
+            url = pick_thumbnail(candidates, effective_title)
             if url:
                 updates["thumbnail_url"] = url
                 updates["thumbnail_source"] = "auto"
