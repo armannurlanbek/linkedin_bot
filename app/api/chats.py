@@ -1,5 +1,6 @@
 import base64
 import io
+from datetime import datetime, timezone
 import json
 import mimetypes
 import queue
@@ -12,8 +13,9 @@ from sqlalchemy.orm import Session
 import httpx
 
 from app.config import settings
-from app.db import get_db, Chat, Message, SessionLocal
+from app.db import get_db, Chat, LibraryPost, Message, SessionLocal
 from app.services.agent import run_agent
+from app.services.chat_meta import apply_chat_meta, is_post_message
 
 router = APIRouter(prefix="/api")
 
@@ -31,6 +33,37 @@ class MessageBody(BaseModel):
     attachments: list[dict] = []
 
 
+class ChatPatch(BaseModel):
+    title: str | None = None
+    thumbnail_url: str | None = None
+    posted: bool | None = None
+    posted_message_id: int | None = None
+
+
+def _message_text(content) -> str:
+    """Join the text blocks of a stored message."""
+    if not isinstance(content, list):
+        return content if isinstance(content, str) else ""
+    return "\n".join(
+        b.get("text", "") for b in content
+        if isinstance(b, dict) and b.get("type") == "text"
+    ).strip()
+
+
+def _serialize_chat(chat: Chat, posted_preview: str | None = None) -> dict:
+    return {
+        "id": chat.id,
+        "title": chat.title,
+        "title_source": chat.title_source,
+        "thumbnail_url": chat.thumbnail_url,
+        "thumbnail_source": chat.thumbnail_source,
+        "posted_at": chat.posted_at,
+        "posted_message_id": chat.posted_message_id,
+        "posted_preview": posted_preview,
+        "updated_at": chat.updated_at,
+    }
+
+
 @router.post("/chats", status_code=201)
 def create_chat(body: ChatCreate = ChatCreate(), db: Session = Depends(get_db)):
     chat = Chat(title=body.title)
@@ -43,7 +76,15 @@ def create_chat(body: ChatCreate = ChatCreate(), db: Session = Depends(get_db)):
 @router.get("/chats")
 def list_chats(db: Session = Depends(get_db)):
     chats = db.query(Chat).order_by(Chat.updated_at.desc()).all()
-    return [{"id": c.id, "title": c.title, "thumbnail_url": c.thumbnail_url, "updated_at": c.updated_at} for c in chats]
+    posted_ids = [c.posted_message_id for c in chats if c.posted_message_id]
+    previews: dict[int, str] = {}
+    if posted_ids:
+        for m in db.query(Message).filter(Message.id.in_(posted_ids)).all():
+            previews[m.id] = _message_text(m.content)[:120]
+    return [
+        _serialize_chat(c, previews.get(c.posted_message_id) if c.posted_message_id else None)
+        for c in chats
+    ]
 
 
 @router.get("/chats/{chat_id}")
@@ -58,13 +99,105 @@ def get_chat(chat_id: int, db: Session = Depends(get_db)):
         .all()
     )
     return {
-        "id": chat.id,
-        "title": chat.title,
+        **_serialize_chat(chat),
         "messages": [
             {"id": m.id, "role": m.role, "content": m.content, "created_at": m.created_at}
             for m in messages
         ],
     }
+
+
+def _last_post_message_id(db: Session, chat_id: int) -> int | None:
+    """The most recent assistant message that is a finished post."""
+    messages = (
+        db.query(Message)
+        .filter(Message.chat_id == chat_id, Message.role == "assistant")
+        .order_by(Message.created_at, Message.id)
+        .all()
+    )
+    for m in reversed(messages):
+        if is_post_message(m.content):
+            return m.id
+    return None
+
+
+def _archive_posted(db: Session, chat_id: int, message_id: int | None) -> None:
+    """File a published post in the style archive the agent writes from.
+
+    Best-effort: the post is already marked as published either way, and the
+    Library keeps its manual archive button. An embedding failure must not turn
+    into a failed request.
+    """
+    if not message_id:
+        return
+    try:
+        from app.api.library import promote_item
+
+        item = db.query(LibraryPost).filter(LibraryPost.message_id == message_id).first()
+        if item is None:
+            msg = db.query(Message).filter(Message.id == message_id).first()
+            body = _message_text(msg.content) if msg else ""
+            if not body:
+                return
+            item = LibraryPost(text=body, chat_id=chat_id, message_id=message_id)
+            db.add(item)
+            db.commit()
+            db.refresh(item)
+        promote_item(db, item)
+    except Exception:
+        db.rollback()
+
+
+@router.patch("/chats/{chat_id}")
+def update_chat(chat_id: int, body: ChatPatch, db: Session = Depends(get_db)):
+    """Rename a chat, set its cover image, or mark it as posted."""
+    chat = db.query(Chat).filter(Chat.id == chat_id).first()
+    if not chat:
+        raise HTTPException(404, "Chat not found")
+
+    updates: dict = {}
+    archive_message_id: int | None = None
+
+    if body.title is not None:
+        title = body.title.strip()
+        if not title:
+            raise HTTPException(400, "Title cannot be empty")
+        # "manual" means no automatic pass ever renames this chat again.
+        updates["title"] = title[:120]
+        updates["title_source"] = "manual"
+
+    if body.thumbnail_url is not None:
+        if not body.thumbnail_url.startswith("http"):
+            raise HTTPException(400, "thumbnail_url must be an http(s) URL")
+        updates["thumbnail_url"] = body.thumbnail_url
+        updates["thumbnail_source"] = "manual"
+
+    if body.posted is not None:
+        if body.posted:
+            message_id = body.posted_message_id or _last_post_message_id(db, chat_id)
+            updates["posted_message_id"] = message_id
+            if chat.posted_at is None:
+                updates["posted_at"] = datetime.now(timezone.utc)
+            archive_message_id = message_id
+        else:
+            updates["posted_at"] = None
+            updates["posted_message_id"] = None
+
+    if updates:
+        # Goes through apply_chat_meta so `updated_at` — which orders the
+        # sidebar — is not bumped by a rename or a cover change.
+        apply_chat_meta(db, chat_id, **updates)
+
+    if archive_message_id:
+        _archive_posted(db, chat_id, archive_message_id)
+
+    db.refresh(chat)
+    preview = None
+    if chat.posted_message_id:
+        msg = db.query(Message).filter(Message.id == chat.posted_message_id).first()
+        if msg:
+            preview = _message_text(msg.content)[:120]
+    return _serialize_chat(chat, preview)
 
 
 @router.delete("/chats/{chat_id}", status_code=204)
@@ -83,12 +216,27 @@ def truncate_messages(chat_id: int, message_id: int, db: Session = Depends(get_d
     msg = db.query(Message).filter(Message.id == message_id, Message.chat_id == chat_id).first()
     if not msg:
         raise HTTPException(404, "Message not found")
+    first = (
+        db.query(Message.id)
+        .filter(Message.chat_id == chat_id)
+        .order_by(Message.created_at, Message.id)
+        .first()
+    )
     (
         db.query(Message)
         .filter(Message.chat_id == chat_id, Message.id >= message_id)
         .delete(synchronize_session=False)
     )
     db.commit()
+    # Editing the opening message usually means a different building, so let the
+    # next post name the chat and pick its cover again.
+    if first and first[0] == message_id:
+        chat = db.query(Chat).filter(Chat.id == chat_id).first()
+        if chat and chat.title_source != "manual":
+            apply_chat_meta(
+                db, chat_id, title_source="auto",
+                thumbnail_url=None, thumbnail_source=None,
+            )
     return Response(status_code=204)
 
 

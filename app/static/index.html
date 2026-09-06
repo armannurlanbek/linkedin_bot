@@ -54,11 +54,28 @@
     .chat-item.active { background: rgba(99,102,241,0.15); border-left-color: #818cf8; color: #fff; }
     .chat-item:hover .delete-btn { opacity: 1; }
     .delete-btn { opacity: 0; transition: opacity 0.15s; }
+    .chat-item:hover .rename-btn { opacity: 1; }
+    .rename-btn { opacity: 0; transition: opacity 0.15s; }
     .chat-thumb-wrap {
+      position: relative;
       width: 44px; height: 44px; flex-shrink: 0;
-      border-radius: 8px; overflow: hidden;
+      border-radius: 8px; overflow: visible;
       background: #1e293b;
       display: flex; align-items: center; justify-content: center;
+    }
+    .chat-thumb-wrap > img { border-radius: 8px; }
+    .chat-posted-badge {
+      position: absolute; right: -3px; bottom: -3px;
+      width: 16px; height: 16px; border-radius: 50%;
+      background: #16a34a; color: #fff;
+      font-size: 9px; line-height: 1;
+      display: flex; align-items: center; justify-content: center;
+      border: 2px solid #0f172a;
+    }
+    .chat-rename-input {
+      flex: 1; min-width: 0; background: #1e293b; color: #fff;
+      border: 1px solid #6366f1; border-radius: 6px;
+      padding: 2px 6px; font-size: 13px; outline: none;
     }
     .chat-thumb-wrap img { width: 100%; height: 100%; object-fit: cover; display: block; }
     .chat-thumb-placeholder { font-size: 20px; line-height: 1; }
@@ -371,6 +388,7 @@
     <!-- Tab toggle -->
     <div class="px-4 pt-3 pb-1 flex gap-1 bg-[#0f172a]">
       <button id="tab-chats" class="sidebar-tab active">💬 Chats</button>
+      <button id="tab-posted" class="sidebar-tab">✅ Posted</button>
       <button id="tab-library" class="sidebar-tab">📚 Library</button>
     </div>
 
@@ -490,6 +508,7 @@
     const menuToggle   = document.getElementById('menu-toggle');
     const tabChats     = document.getElementById('tab-chats');
     const tabLibrary   = document.getElementById('tab-library');
+    const tabPosted    = document.getElementById('tab-posted');
 
     // ── App state ───────────────────────────────────────────────
     let activeChatId         = null;
@@ -498,7 +517,7 @@
     const messageAttachmentsMap = new Map(); // messageId → [{block, name, kind, objectUrl?}]
     let editingFromMessageId = null;
     const chatPanels         = {};
-    let currentTab           = 'chats'; // 'chats' | 'library'
+    let currentTab           = 'chats'; // 'chats' | 'posted' | 'library'
     let pendingLinkedInNote  = []; // [{company, url}] carried from disambiguation confirm into next shell
 
     // ── Tool metadata ────────────────────────────────────────────
@@ -563,72 +582,180 @@
     // SIDEBAR
     // ════════════════════════════════════════════════════════════
 
-    function _makeChatThumb(thumbnailUrl) {
-      const wrap = document.createElement('div');
-      wrap.className = 'chat-thumb-wrap';
-      if (thumbnailUrl) {
+    function _paintPostedBadge(wrap, posted) {
+      const existing = wrap.querySelector('.chat-posted-badge');
+      if (posted && !existing) {
+        const badge = document.createElement('span');
+        badge.className = 'chat-posted-badge';
+        badge.textContent = '✓';
+        badge.title = 'פורסם';
+        wrap.appendChild(badge);
+      } else if (!posted && existing) {
+        existing.remove();
+      }
+    }
+
+    // Replaces the image/placeholder without disturbing the posted badge.
+    function _setThumbImage(wrap, url) {
+      wrap.querySelectorAll('img, .chat-thumb-placeholder').forEach(el => el.remove());
+      if (url) {
         const img = document.createElement('img');
-        img.src = `/api/proxy-image?url=${encodeURIComponent(thumbnailUrl)}`;
+        img.src = `/api/proxy-image?url=${encodeURIComponent(url)}`;
         img.alt = '';
-        img.onerror = () => {
-          img.remove();
-          const ph = document.createElement('span');
-          ph.className = 'chat-thumb-placeholder';
-          ph.textContent = '🏗';
-          wrap.appendChild(ph);
-        };
-        wrap.appendChild(img);
+        img.onerror = () => { img.remove(); _setThumbImage(wrap, null); };
+        wrap.insertBefore(img, wrap.firstChild);
       } else {
         const ph = document.createElement('span');
         ph.className = 'chat-thumb-placeholder';
         ph.textContent = '🏗';
-        wrap.appendChild(ph);
+        wrap.insertBefore(ph, wrap.firstChild);
       }
+    }
+
+    function _makeChatThumb(thumbnailUrl, posted = false) {
+      const wrap = document.createElement('div');
+      wrap.className = 'chat-thumb-wrap';
+      _setThumbImage(wrap, thumbnailUrl);
+      _paintPostedBadge(wrap, posted);
       return wrap;
     }
 
-    function renderSidebarItem(chat, append = false) {
+    function startRename(chatId, item) {
+      const titleEl = item.querySelector('.chat-title');
+      if (!titleEl || item.querySelector('.chat-rename-input')) return;
+      const previous = titleEl.textContent;
+
+      const input = document.createElement('input');
+      input.className = 'chat-rename-input';
+      input.setAttribute('dir', 'rtl');
+      input.value = previous;
+      titleEl.replaceWith(input);
+      input.focus();
+      input.select();
+
+      let settled = false;
+      const restore = (text) => {
+        if (settled) return;
+        settled = true;
+        titleEl.textContent = text;
+        input.replaceWith(titleEl);
+      };
+
+      const commit = async () => {
+        const value = input.value.trim();
+        if (!value || value === previous) return restore(previous);
+        restore(value);
+        try {
+          // A manual name is final — no automatic pass renames this chat again.
+          await apiPatch(`/api/chats/${chatId}`, { title: value });
+        } catch (e) {
+          console.error('Rename failed', e);
+          const el = document.getElementById(`chat-item-${chatId}`)?.querySelector('.chat-title');
+          if (el) el.textContent = previous;
+        }
+      };
+
+      input.addEventListener('click', e => e.stopPropagation());
+      input.addEventListener('keydown', e => {
+        e.stopPropagation();
+        if (e.key === 'Enter') { e.preventDefault(); commit(); }
+        else if (e.key === 'Escape') { e.preventDefault(); restore(previous); }
+      });
+      input.addEventListener('blur', commit);
+    }
+
+    // opts.postedMode renders the row for the Posted tab: publication date,
+    // a snippet of what went out, and un-post in place of delete.
+    function renderSidebarItem(chat, append = false, opts = {}) {
+      const postedMode = !!opts.postedMode;
+      const isPosted = !!chat.posted_at;
       const existing = document.getElementById(`chat-item-${chat.id}`);
-      if (existing) {
+      if (existing && !postedMode) {
         const titleEl = existing.querySelector('.chat-title');
         if (titleEl) titleEl.textContent = chat.title || 'New Chat';
-        // Apply thumbnail if it just became available
-        if (chat.thumbnail_url) {
-          const wrap = existing.querySelector('.chat-thumb-wrap');
-          if (wrap && !wrap.querySelector('img')) {
-            wrap.innerHTML = '';
-            const img = document.createElement('img');
-            img.src = `/api/proxy-image?url=${encodeURIComponent(chat.thumbnail_url)}`;
-            img.alt = '';
-            img.onerror = () => img.remove();
-            wrap.appendChild(img);
+        const wrap = existing.querySelector('.chat-thumb-wrap');
+        if (wrap) {
+          // Only fill an empty slot here. A cover correction arrives through
+          // updateSidebarThumbnail(..., true), which replaces deliberately.
+          if (chat.thumbnail_url && !wrap.querySelector('img')) {
+            _setThumbImage(wrap, chat.thumbnail_url);
           }
+          _paintPostedBadge(wrap, isPosted);
         }
         return existing;
       }
 
       const item = document.createElement('div');
-      item.id = `chat-item-${chat.id}`;
+      item.id = postedMode ? `posted-item-${chat.id}` : `chat-item-${chat.id}`;
       item.dataset.chatId = chat.id;
       item.className = 'chat-item flex items-center gap-3 px-3 py-2.5 rounded-lg cursor-pointer text-slate-300';
 
-      item.appendChild(_makeChatThumb(chat.thumbnail_url));
+      item.appendChild(_makeChatThumb(chat.thumbnail_url, isPosted));
+
+      const titleCol = document.createElement('div');
+      titleCol.className = 'flex-1 min-w-0';
 
       const title = document.createElement('span');
-      title.className = 'chat-title flex-1 text-sm leading-snug line-clamp-2 text-right';
+      title.className = 'chat-title block text-sm leading-snug line-clamp-2 text-right';
       title.setAttribute('dir', 'rtl');
       title.textContent = chat.title || 'New Chat';
-      item.appendChild(title);
+      titleCol.appendChild(title);
 
-      const del = document.createElement('button');
-      del.className = 'delete-btn shrink-0 text-slate-500 hover:text-red-400 text-xs px-1 transition';
-      del.textContent = '×';
-      del.title = 'Delete chat';
-      del.addEventListener('click', async (e) => {
-        e.stopPropagation();
-        await deleteChat(chat.id);
-      });
-      item.appendChild(del);
+      if (postedMode) {
+        const meta = document.createElement('span');
+        meta.className = 'block text-[10px] text-green-400/80 mt-0.5 text-right';
+        meta.setAttribute('dir', 'rtl');
+        meta.textContent = chat.posted_at
+          ? `פורסם ${new Date(chat.posted_at).toLocaleDateString('he-IL')}`
+          : 'פורסם';
+        titleCol.appendChild(meta);
+
+        if (chat.posted_preview) {
+          const snippet = document.createElement('span');
+          snippet.className = 'block text-[11px] text-slate-500 mt-0.5 text-right line-clamp-1';
+          snippet.setAttribute('dir', 'rtl');
+          snippet.textContent = chat.posted_preview;
+          titleCol.appendChild(snippet);
+        }
+      }
+      item.appendChild(titleCol);
+
+      if (postedMode) {
+        const unpost = document.createElement('button');
+        unpost.className = 'delete-btn shrink-0 text-slate-500 hover:text-amber-400 text-xs px-1 transition';
+        unpost.textContent = '↩';
+        unpost.title = 'סמן כלא פורסם';
+        unpost.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          try {
+            await apiPatch(`/api/chats/${chat.id}`, { posted: false });
+            item.remove();
+            updateSidebarPosted(chat.id, null);
+            if (!sidebarList.querySelector('.chat-item')) renderPostedList();
+          } catch (err) { console.error(err); }
+        });
+        item.appendChild(unpost);
+      } else {
+        const rename = document.createElement('button');
+        rename.className = 'rename-btn shrink-0 text-slate-500 hover:text-indigo-400 text-xs px-1 transition';
+        rename.textContent = '✎';
+        rename.title = 'שנה שם';
+        rename.addEventListener('click', (e) => {
+          e.stopPropagation();
+          startRename(chat.id, item);
+        });
+        item.appendChild(rename);
+
+        const del = document.createElement('button');
+        del.className = 'delete-btn shrink-0 text-slate-500 hover:text-red-400 text-xs px-1 transition';
+        del.textContent = '×';
+        del.title = 'Delete chat';
+        del.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          await deleteChat(chat.id);
+        });
+        item.appendChild(del);
+      }
 
       item.addEventListener('click', () => { loadChat(chat.id); closeSidebar(); });
       if (append) sidebarList.appendChild(item);
@@ -636,17 +763,22 @@
       return item;
     }
 
-    function updateSidebarThumbnail(chatId, url) {
+    // `replace` distinguishes filling an empty slot (a mid-run placeholder)
+    // from correcting a cover that is already showing the wrong building.
+    function updateSidebarThumbnail(chatId, url, replace = false) {
       const item = document.getElementById(`chat-item-${chatId}`);
       if (!item) return;
       const wrap = item.querySelector('.chat-thumb-wrap');
-      if (!wrap || wrap.querySelector('img')) return; // already has an image
-      wrap.innerHTML = '';
-      const img = document.createElement('img');
-      img.src = `/api/proxy-image?url=${encodeURIComponent(url)}`;
-      img.alt = '';
-      img.onerror = () => img.remove();
-      wrap.appendChild(img);
+      if (!wrap) return;
+      if (!replace && wrap.querySelector('img')) return;
+      _setThumbImage(wrap, url);
+    }
+
+    function updateSidebarPosted(chatId, postedAt) {
+      const item = document.getElementById(`chat-item-${chatId}`);
+      if (!item) return;
+      const wrap = item.querySelector('.chat-thumb-wrap');
+      if (wrap) _paintPostedBadge(wrap, !!postedAt);
     }
 
     function setActiveSidebarItem(chatId) {
@@ -767,7 +899,7 @@
     // IMAGE GRID
     // ════════════════════════════════════════════════════════════
 
-    function buildImageGrid(images) {
+    function buildImageGrid(images, chatId = null) {
       const LIMIT = 4;
       const shown = images.slice(0, LIMIT);
       const extra = images.slice(LIMIT);
@@ -819,6 +951,26 @@
         dlLink.addEventListener('click', e => e.stopPropagation());
 
         actions.appendChild(dlLink);
+
+        // Manual override for the sidebar cover — the last word on which photo
+        // represents this conversation.
+        const coverBtn = document.createElement('button');
+        coverBtn.className = 'text-xs text-slate-400 hover:text-indigo-500 transition';
+        coverBtn.textContent = '★ תמונת שיחה';
+        coverBtn.title = 'קבע כתמונת השיחה בסרגל הצד';
+        coverBtn.addEventListener('click', async e => {
+          e.stopPropagation();
+          const target = chatId || activeChatId;
+          if (!target) return;
+          try {
+            await apiPatch(`/api/chats/${target}`, { thumbnail_url: src });
+            updateSidebarThumbnail(target, src, true);
+            coverBtn.textContent = '✓ תמונת שיחה';
+            coverBtn.classList.add('text-indigo-500');
+          } catch (err) { console.error('Failed to set cover', err); }
+        });
+        actions.appendChild(coverBtn);
+
         outer.appendChild(actions);
 
         return outer;
@@ -845,7 +997,7 @@
     // ASSISTANT MESSAGE SHELL
     // ════════════════════════════════════════════════════════════
 
-    function createAssistantMessageShell(panel) {
+    function createAssistantMessageShell(panel, chatId = null) {
       const target = panel || getOrCreatePanel(activeChatId);
       emptyState.style.display = 'none';
       target.style.display = '';
@@ -1003,12 +1155,48 @@
         }
       });
 
+      // ── Posted button ─────────────────────────────────────────
+      // Marking a conversation as published also files its post in the style
+      // archive the agent writes from.
+      let postedState = false;
+      const postedBtn = document.createElement('button');
+      postedBtn.className = 'hidden self-end text-xs font-medium text-slate-600 bg-white hover:bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5 transition shadow-sm';
+
+      function paintPostedBtn() {
+        postedBtn.textContent = postedState ? '✓ פורסם' : '📤 סמן כפורסם';
+        postedBtn.title = postedState
+          ? 'בטל את סימון הפרסום'
+          : 'סמן שהפוסט פורסם — הוא יופיע בלשונית Posted ויתווסף לארכיון הסגנון';
+        postedBtn.classList.toggle('text-green-600', postedState);
+        postedBtn.classList.toggle('border-green-300', postedState);
+      }
+      paintPostedBtn();
+
+      postedBtn.addEventListener('click', async () => {
+        const target = chatId || activeChatId;
+        if (!target) return;
+        const next = !postedState;
+        postedBtn.disabled = true;
+        try {
+          const updated = await apiPatch(`/api/chats/${target}`, { posted: next });
+          postedState = !!updated.posted_at;
+          paintPostedBtn();
+          updateSidebarPosted(target, updated.posted_at);
+          if (currentTab === 'posted') renderPostedList();
+        } catch (e) {
+          console.error('Failed to update posted state', e);
+        } finally {
+          postedBtn.disabled = false;
+        }
+      });
+
       // ── Error display ─────────────────────────────────────────
       const errorEl = document.createElement('div');
       errorEl.className = 'hidden rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700';
 
       const btnRow = document.createElement('div');
       btnRow.className = 'flex items-center justify-end gap-2';
+      btnRow.appendChild(postedBtn);
       btnRow.appendChild(saveBtn);
       btnRow.appendChild(copyBtn);
 
@@ -1097,7 +1285,7 @@
             entry.previewEl.classList.remove('hidden');
           }
           if (images && images.length > 0) {
-            const grid = buildImageGrid(images);
+            const grid = buildImageGrid(images, chatId);
             imagesSection.appendChild(grid);
             imagesSection.classList.remove('hidden');
             scrollToBottom();
@@ -1106,7 +1294,7 @@
 
         addImages(images) {
           if (!images || images.length === 0) return;
-          const grid = buildImageGrid(images);
+          const grid = buildImageGrid(images, chatId);
           imagesSection.appendChild(grid);
           imagesSection.classList.remove('hidden');
         },
@@ -1263,10 +1451,19 @@
           if (postContent.textContent.trim()) {
             copyBtn.classList.remove('hidden');
             saveBtn.classList.remove('hidden');
+            postedBtn.classList.remove('hidden');
           }
           this.finalizeDisambiguations();
           if (shellLinkedInResolved.length > 0) this.showLinkedInMentionsNote(shellLinkedInResolved);
           scrollToBottom(true);
+        },
+
+        // Only the newest post card carries the button — "posted" describes the
+        // conversation, and the backend resolves it to its latest finished post.
+        setPostedState(postedAt) {
+          postedState = !!postedAt;
+          paintPostedBtn();
+          if (postContent.textContent.trim()) postedBtn.classList.remove('hidden');
         },
 
         showError(msg) {
@@ -1578,7 +1775,7 @@
             if (Array.isArray(content)) {
               content.forEach(b => { if (b.type === 'tool_use' && b.id) toolNameById_hist[b.id] = b.name; });
             }
-            lastShell = createAssistantMessageShell(panel);
+            lastShell = createAssistantMessageShell(panel, key);
             if (Array.isArray(content)) {
               lastShell.renderHistory(content);
             } else if (typeof content === 'string') {
@@ -1590,6 +1787,13 @@
             }
           }
         }
+
+        // The turn may have finished (and renamed the chat / fixed its cover)
+        // while the stream was interrupted, so trust the server's values here.
+        updateSidebarTitle(key, chat.title || 'New Chat');
+        updateSidebarThumbnail(key, chat.thumbnail_url, true);
+        updateSidebarPosted(key, chat.posted_at);
+        if (lastShell) lastShell.setPostedState(chat.posted_at);
 
         showPanel(key);
         requestAnimationFrame(() => scrollToBottom(true));
@@ -1738,7 +1942,7 @@
         streamItem.insertBefore(dot, streamItem.querySelector('.delete-btn'));
       }
 
-      const shell = createAssistantMessageShell(panel);
+      const shell = createAssistantMessageShell(panel, thisChatId);
 
       try {
         const resp = await fetch(`/api/chats/${thisChatId}/messages`, {
@@ -1844,7 +2048,7 @@
           }
           break;
         case 'thumbnail':
-          if (event.url) updateSidebarThumbnail(thisChatId, event.url);
+          if (event.url) updateSidebarThumbnail(thisChatId, event.url, !!event.replace);
           break;
         case 'done':
           shell.finalize();
@@ -1908,16 +2112,46 @@
     function switchTab(tab) {
       currentTab = tab;
       tabChats.classList.toggle('active', tab === 'chats');
+      tabPosted.classList.toggle('active', tab === 'posted');
       tabLibrary.classList.toggle('active', tab === 'library');
       newChatWrap.style.display = tab === 'chats' ? '' : 'none';
       if (tab === 'library') {
         renderLibraryList();
+      } else if (tab === 'posted') {
+        renderPostedList();
       } else {
         loadChatList();
       }
     }
     tabChats.addEventListener('click', () => switchTab('chats'));
+    tabPosted.addEventListener('click', () => switchTab('posted'));
     tabLibrary.addEventListener('click', () => switchTab('library'));
+
+    // ════════════════════════════════════════════════════════════
+    // POSTED
+    // ════════════════════════════════════════════════════════════
+
+    async function renderPostedList() {
+      try {
+        const chats = await apiGet('/api/chats');
+        const posted = chats
+          .filter(c => c.posted_at)
+          .sort((a, b) => new Date(b.posted_at) - new Date(a.posted_at));
+        sidebarList.innerHTML = '';
+        if (posted.length === 0) {
+          const empty = document.createElement('p');
+          empty.className = 'text-xs text-slate-500 px-3 py-4 text-center leading-relaxed';
+          empty.setAttribute('dir', 'rtl');
+          empty.textContent = 'עדיין לא סומן פוסט כפורסם. סמן פוסט בשיחה בכפתור "פורסם".';
+          sidebarList.appendChild(empty);
+          return;
+        }
+        // Unlike loadChatList, this must not auto-open the first chat.
+        posted.forEach(c => renderSidebarItem(c, true, { postedMode: true }));
+      } catch (e) {
+        console.error('Failed to load posted list', e);
+      }
+    }
 
     // ════════════════════════════════════════════════════════════
     // LIBRARY
@@ -1953,10 +2187,6 @@
       const meta = document.createElement('div');
       meta.className = 'flex items-center gap-1.5 flex-wrap';
 
-      const statusBadge = document.createElement('span');
-      statusBadge.className = `lib-status-badge ${item.status}`;
-      statusBadge.textContent = item.status;
-
       if (item.promoted) {
         const promBadge = document.createElement('span');
         promBadge.className = 'lib-status-badge promoted';
@@ -1968,7 +2198,6 @@
       date.className = 'text-[10px] text-slate-500 ml-auto';
       date.textContent = item.created_at ? new Date(item.created_at).toLocaleDateString('he-IL') : '';
 
-      meta.appendChild(statusBadge);
       meta.appendChild(date);
       el.appendChild(preview);
       el.appendChild(meta);
@@ -1984,24 +2213,6 @@
       copyBtn2.addEventListener('click', e => {
         e.stopPropagation();
         navigator.clipboard.writeText(item.text).then(() => { copyBtn2.textContent = '✓'; setTimeout(() => copyBtn2.textContent = '📋', 1500); });
-      });
-
-      const postBtn = document.createElement('button');
-      postBtn.className = 'text-[11px] text-slate-400 hover:text-green-400 transition';
-      postBtn.title = item.status === 'posted' ? 'Mark as draft' : 'Mark as posted';
-      postBtn.textContent = item.status === 'posted' ? '↩ Draft' : '✅ Posted';
-      postBtn.addEventListener('click', async e => {
-        e.stopPropagation();
-        const newStatus = item.status === 'posted' ? 'draft' : 'posted';
-        try {
-          const updated = await apiPatch(`/api/library/${item.id}`, { status: newStatus });
-          item.status = updated.status;
-          item.posted_at = updated.posted_at;
-          statusBadge.className = `lib-status-badge ${updated.status}`;
-          statusBadge.textContent = updated.status;
-          postBtn.textContent = updated.status === 'posted' ? '↩ Draft' : '✅ Posted';
-          postBtn.title = updated.status === 'posted' ? 'Mark as draft' : 'Mark as posted';
-        } catch (err) { console.error(err); }
       });
 
       const archiveBtn = document.createElement('button');
@@ -2041,7 +2252,6 @@
       });
 
       actions.appendChild(copyBtn2);
-      actions.appendChild(postBtn);
       actions.appendChild(archiveBtn);
       actions.appendChild(delBtn2);
       el.appendChild(actions);

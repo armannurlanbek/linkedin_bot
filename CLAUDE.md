@@ -63,6 +63,18 @@ Messages are ordered by **`(created_at, id)`** in both `_load_history` and `get_
 - `search_web`, `find_linkedin_profiles`, `search_images` → `search.py` (all Tavily).
 - `retrieve_similar_posts` → `retrieval.py`: OpenAI `text-embedding-3-small` + pgvector cosine distance over the `posts` table.
 
+### Chat metadata — title, cover image, posted (`app/services/chat_meta.py`)
+The sidebar title and cover image are derived from the **finished post**, not from the opening message. The opening message is usually a bare URL, which is why titles used to read "קישור לינקדאין קצר" (or a truncated refusal) and covers showed whatever photo the scraped page happened to carry.
+
+- `run_agent` sets a cheap placeholder up front (`_PLACEHOLDER_TITLE` for a URL-only opening, otherwise `_generate_title`), then calls `finalize_chat_meta` **after** yielding `done` on the `end_turn` branch. Running it there keeps the post card finalising instantly, and it still completes on a disconnect because it is inside the worker thread.
+- Cover selection is a priority rule, not a guess: `search_images` results beat `scrape_url` results, because `search_images` is queried with the building's name and ranked in `search.py::_rank_images`, while `scrape_url` images come from the source page. `run_agent` accumulates `image_candidates` per tool during the turn; when the post comes from a turn that ran no image tools (the second half of the disambiguation flow), `candidates_from_db` recovers them from the `__images__` kept in stored tool_results.
+- **`title_source` / `thumbnail_source` gate every automatic write.** `manual` (the user renamed the chat or picked a cover via `PATCH /api/chats/{id}`) is never overwritten; `post`/`auto` means already settled; `auto`/`heuristic`/NULL means still eligible. The mid-run thumbnail write is additionally `WHERE thumbnail_url IS NULL`, so a later turn that scrapes something cannot clobber a good cover.
+- **All metadata writes must go through `apply_chat_meta`**, which uses raw SQL. `chats.updated_at` carries `onupdate=func.now()` and the sidebar is ordered by it, so an ORM write here — above all the backfill's — would reshuffle the entire chat list into the order rows were touched.
+- `scripts/backfill_chat_meta.py` applies the same functions to existing chats (`--dry-run` first; per-chat commit, so it is resumable and re-runnable).
+
+### Posted vs Library
+Publication state lives on **`chats`** (`posted_at`, `posted_message_id`), not on `library_posts` — the user's unit is the conversation, and most chats have no library row. `PATCH /api/chats/{id} {"posted": true}` resolves the chat's latest *finished* post (`is_post_message`: an assistant message with no `tool_use` and ≥300 chars of text, which is what excludes the short disambiguation hard-stop) and then calls `library.promote_item` so a published post also joins the RAG archive. The sidebar has three tabs: Chats, Posted, Library. `library_posts.status` and its PATCH endpoint still exist and still work, but the UI no longer writes them — the Library is archive-only.
+
 ### LinkedIn @mention flow (non-obvious)
 `find_linkedin_profiles` is meant to be called **once**, for the single most important company. The branching lives in `run_agent` (not `execute_tool`):
 - `count == 1` → emit `linkedin_resolved` SSE; Claude writes `@Company`.

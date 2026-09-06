@@ -78,6 +78,29 @@ def delete_post(item_id: int, db: Session = Depends(get_db)):
     return Response(status_code=204)
 
 
+def promote_item(db: Session, item: LibraryPost) -> bool:
+    """Embed a saved post and add it to the RAG archive. Idempotent.
+
+    Shared with the chats API, where marking a conversation as posted files its
+    post in the archive automatically.
+    """
+    if item.promoted:
+        return False
+    client = OpenAI(api_key=settings.openai_api_key)
+    resp = client.embeddings.create(model=EMBEDDING_MODEL, input=[item.text])
+
+    post = Post(
+        text=item.text,
+        embedding=resp.data[0].embedding,
+        char_count=len(item.text),
+        source="library",
+    )
+    db.add(post)
+    item.promoted = True
+    db.commit()
+    return True
+
+
 @router.post("/{item_id}/promote")
 def promote_post(item_id: int, db: Session = Depends(get_db)):
     """Embed the post text and add it to the RAG archive (posts table)."""
@@ -86,20 +109,7 @@ def promote_post(item_id: int, db: Session = Depends(get_db)):
         raise HTTPException(404, "Not found")
     if item.promoted:
         return {"ok": True, "already_promoted": True}
-
-    client = OpenAI(api_key=settings.openai_api_key)
-    resp = client.embeddings.create(model=EMBEDDING_MODEL, input=[item.text])
-    embedding = resp.data[0].embedding
-
-    post = Post(
-        text=item.text,
-        embedding=embedding,
-        char_count=len(item.text),
-        source="library",
-    )
-    db.add(post)
-    item.promoted = True
-    db.commit()
+    promote_item(db, item)
     return {"ok": True}
 
 

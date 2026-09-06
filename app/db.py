@@ -31,7 +31,17 @@ class Chat(Base):
     __tablename__ = "chats"
     id = Column(Integer, primary_key=True)
     title = Column(String, nullable=False, default="New chat")
+    # "auto"   — placeholder from the first message, may still be replaced
+    # "post"   — derived from the finished post; only a human overrides it
+    # "manual" — the user renamed it; never touched automatically again
+    title_source = Column(String, nullable=False, default="auto")
     thumbnail_url = Column(String, nullable=True)
+    # "heuristic" — first image seen mid-run, a placeholder
+    # "auto"      — picked once the post was written
+    # "manual"    — the user chose it; never replaced automatically
+    thumbnail_source = Column(String, nullable=True)
+    posted_at = Column(DateTime(timezone=True), nullable=True)
+    posted_message_id = Column(Integer, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
@@ -83,6 +93,10 @@ def _migrate():
     """Run each DDL statement in its own auto-committing transaction."""
     stmts = [
         "ALTER TABLE chats ADD COLUMN IF NOT EXISTS thumbnail_url TEXT",
+        "ALTER TABLE chats ADD COLUMN IF NOT EXISTS title_source TEXT NOT NULL DEFAULT 'auto'",
+        "ALTER TABLE chats ADD COLUMN IF NOT EXISTS thumbnail_source TEXT",
+        "ALTER TABLE chats ADD COLUMN IF NOT EXISTS posted_at TIMESTAMPTZ",
+        "ALTER TABLE chats ADD COLUMN IF NOT EXISTS posted_message_id INTEGER",
         "ALTER TABLE posts ADD COLUMN IF NOT EXISTS source TEXT",
         "ALTER TABLE library_posts ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now()",
         "ALTER TABLE library_posts ADD COLUMN IF NOT EXISTS posted_at TIMESTAMPTZ",

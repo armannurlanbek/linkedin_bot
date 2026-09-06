@@ -1,11 +1,14 @@
 import json
+import re
 from pathlib import Path
 
 import anthropic
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.db import Chat, Message, SessionLocal
+from app.services.chat_meta import extract_post_text, finalize_chat_meta
 from app.services.tools import TOOLS, execute_tool, summarize_result
 
 MODEL = "claude-sonnet-4-6"
@@ -326,6 +329,12 @@ def _load_history(db: Session, chat_id: int) -> list:
     return _drop_orphan_tool_results(_repair_tool_pairs(result))
 
 
+_URL_ONLY_RE = re.compile(r"^\s*https?://\S+\s*$")
+
+# Shown only until the post is written and chat_meta renames the chat for real.
+_PLACEHOLDER_TITLE = "פוסט חדש…"
+
+
 def _generate_title(user_text: str) -> str:
     client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
     resp = client.messages.create(
@@ -362,7 +371,14 @@ def run_agent(chat_id: int, user_text: str, db: Session, attachments: list[dict]
         effective_text = user_text.strip() or "בדוק את הקבצים המצורפים והשתמש בהם כהקשר לפי הצורך."
         if is_first:
             try:
-                title = _generate_title(effective_text)
+                # A bare URL says nothing about the subject, and asking the model
+                # to name a chat from one produced titles like "קישור לינקדאין
+                # קצר" — or a truncated refusal. Use a placeholder and let
+                # finalize_chat_meta name the chat from the finished post.
+                if _URL_ONLY_RE.match(effective_text):
+                    title = _PLACEHOLDER_TITLE
+                else:
+                    title = _generate_title(effective_text)
                 db.query(Chat).filter(Chat.id == chat_id).update({"title": title})
                 db.commit()
                 yield _sse({"type": "title", "title": title})
@@ -376,6 +392,9 @@ def run_agent(chat_id: int, user_text: str, db: Session, attachments: list[dict]
         # Track yielded images to avoid duplicates across tool calls
         seen_images: set[str] = set()
         thumbnail_saved = False
+        # Full per-tool image lists, kept in the order each tool ranked them, so
+        # the cover can be chosen from the right tool once the post exists.
+        image_candidates: dict[str, list[str]] = {}
 
         # Tool-use loop (max 8 iterations)
         for _ in range(8):
@@ -415,6 +434,14 @@ def run_agent(chat_id: int, user_text: str, db: Session, attachments: list[dict]
 
             if final.stop_reason == "end_turn":
                 yield _sse({"type": "done"})
+                # Name the chat and set its cover from the finished post. Runs
+                # after "done" so the post card finalises immediately, and
+                # inside the worker thread so it completes even if the client
+                # disconnected mid-stream.
+                post_text = extract_post_text(content_blocks)
+                if post_text:
+                    for event in finalize_chat_meta(db, chat_id, post_text, image_candidates):
+                        yield _sse(event)
                 return
 
             # Handle tool_use
@@ -466,12 +493,28 @@ def run_agent(chat_id: int, user_text: str, db: Session, attachments: list[dict]
                         raw = [u for u in result["images"] if isinstance(u, str) and u.startswith("http")][:12]
                         images = [u for u in raw if u not in seen_images]
                         seen_images.update(images)
+                        # Keep the pre-dedupe list: each tool's own ranking is
+                        # what pick_thumbnail relies on.
+                        bucket = image_candidates.setdefault(block.name, [])
+                        bucket.extend(u for u in raw if u not in bucket)
                     if images and not thumbnail_saved:
                         try:
-                            db.query(Chat).filter(Chat.id == chat_id).update({"thumbnail_url": images[0]})
+                            # Placeholder only, and only when there is nothing
+                            # yet — a cover already chosen from a finished post
+                            # (or by the user) must not be replaced by whatever
+                            # a later turn happens to scrape first.
+                            written = db.execute(
+                                text(
+                                    "UPDATE chats SET thumbnail_url = :url, "
+                                    "thumbnail_source = 'heuristic' "
+                                    "WHERE id = :id AND thumbnail_url IS NULL"
+                                ),
+                                {"url": images[0], "id": chat_id},
+                            ).rowcount
                             db.commit()
                             thumbnail_saved = True
-                            yield _sse({"type": "thumbnail", "url": images[0]})
+                            if written:
+                                yield _sse({"type": "thumbnail", "url": images[0]})
                         except Exception:
                             db.rollback()
                     yield _sse({"type": "tool_result", "id": block.id, "preview": preview, "images": images})
