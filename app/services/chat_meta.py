@@ -119,17 +119,35 @@ def collect_candidates_from_messages(messages) -> dict[str, list[str]]:
     return by_tool
 
 
+# Stock libraries, clipart and vector art make poor covers — a Freepik vector of
+# "cross shapes" is not a photo of the building. search.py already rejects these
+# at search time, but candidates recovered from older conversations were stored
+# before that filter existed, so cover selection applies the standard again.
+# Deliberately narrower than search.py's list: social CDN hosts stay allowed,
+# because Instagram and Facebook post photos are extracted on purpose.
+_COVER_SKIP = (
+    "freepik", "shutterstock", "istockphoto", "dreamstime", "123rf",
+    "vecteezy", "pixabay", "publicdomainpictures", "getdrawings",
+    "pinimg", "pinterest", "etsy",
+    "clipart", "/logo", "logo.", "favicon", "sprite", "placeholder", "avatar",
+)
+
+
+def _usable_cover(url) -> bool:
+    if not isinstance(url, str) or not url.startswith("http"):
+        return False
+    low = url.lower()
+    return not any(bad in low for bad in _COVER_SKIP)
+
+
 def pick_thumbnail(by_tool: dict[str, list[str]]) -> str | None:
     """Choose the cover image: the subject-searched photo before the scraped one."""
-    for tool in IMAGE_TOOL_PRIORITY:
+    ordered = list(IMAGE_TOOL_PRIORITY) + [
+        t for t in by_tool if t not in IMAGE_TOOL_PRIORITY
+    ]
+    for tool in ordered:
         for url in by_tool.get(tool) or []:
-            if isinstance(url, str) and url.startswith("http"):
-                return url
-    for tool, urls in by_tool.items():
-        if tool in IMAGE_TOOL_PRIORITY:
-            continue
-        for url in urls or []:
-            if isinstance(url, str) and url.startswith("http"):
+            if _usable_cover(url):
                 return url
     return None
 
