@@ -61,6 +61,12 @@ Messages are ordered by **`(created_at, id)`** in both `_load_history` and `get_
 ### Tools — `app/services/tools.py` (schemas + `execute_tool` dispatcher)
 - `scrape_url` → `scraper.py`: httpx first, then Tavily *extract*, then Tavily *search* index as fallback; social/login-walled domains go straight to Tavily. Extracted images come from `og:image`/`<img>` tags filtered by `_SKIP_PATTERNS`. Trap: LinkedIn is *not* in the login-wall list, so a logged-out LinkedIn URL is scraped directly and its `og:image` resolves to the **publisher's company cover** (`media.licdn.com/.../company-background`), not the post's photo — which is why `_SKIP_PATTERNS` drops `licdn`/`linkedin` assets. Match that CDN host (`licdn.com`), not just `linkedin.com`, when filtering LinkedIn images anywhere.
 - `search_web`, `find_linkedin_profiles`, `search_images` → `search.py` (all Tavily).
+
+**Instagram/Facebook (`scraper.py`, social branch) — the user-agent trap.** Instagram renders `/p/<code>/embed/captioned/` server-side (caption + every carousel photo), but **only for a plain `Mozilla/5.0`**. The module's browser-like `HEADERS` string gets a 618 KB JavaScript shell with nothing in it — measured from production, 0/4 posts with `HEADERS` vs 4/4 with `_PLAIN_UA`, at ~0.5s against 8-15s for a Tavily extract. So Instagram goes to the embed endpoint first and only falls back to Tavily. Don't "fix" the embed fetch by giving it the realistic UA; that is the thing being refused.
+
+Facebook has no equivalent — every user agent gets the login wall. But a `share/p/<code>` link 302s to its canonical `story.php` permalink in a 0-byte response, and Tavily reads the two shapes with **independent** success (on real URLs, each rescued a post the other returned nothing for), so `_resolve_facebook_share` follows redirects by hand and both shapes are tried.
+
+**Do not add cookie-based or headless-browser scraping of these sites.** It requires a real logged-in account, which Meta will eventually checkpoint or disable — and that account would be the CEO's or the company's. If the logged-out path is not enough, the next step is a logged-out third-party scraper API (e.g. Apify), not credentials.
 - `retrieve_similar_posts` → `retrieval.py`: OpenAI `text-embedding-3-small` + pgvector cosine distance over the `posts` table.
 
 ### Chat metadata — title, cover image, posted (`app/services/chat_meta.py`)

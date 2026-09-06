@@ -1,5 +1,6 @@
 """Fetch an article URL and extract text + image URLs."""
 
+import html as htmllib
 import re
 import httpx
 from bs4 import BeautifulSoup
@@ -257,6 +258,144 @@ def _tavily_search(url: str) -> dict | None:
         return None
 
 
+# ── Instagram embed endpoint ──────────────────────────────────────────────────
+# Instagram renders /embed/captioned/ server-side — the caption and every
+# carousel photo are in the HTML — but only for a plain user agent. Measured
+# from the production server against the four Instagram URLs the operator has
+# actually pasted: this module's browser-like HEADERS returned a 618 KB
+# JavaScript shell with no caption and no photos (0/4), while "Mozilla/5.0"
+# returned the rendered page (4/4) in ~0.5s versus 8-15s for a Tavily extract.
+# So the browser-like UA, added to look legitimate, was the thing being refused.
+_PLAIN_UA = "Mozilla/5.0"
+
+_IG_SHORTCODE_RE = re.compile(r"/(?:p|reel|reels|tv)/([A-Za-z0-9_-]{5,})")
+_IG_CAPTION_RE = re.compile(r'class="Caption"(.*?)</div>', re.S)
+_IG_TAG_RE = re.compile(r"<[^>]+>")
+# The carousel is JSON inside a JS string, so it arrives escaped:
+#   display_url\":\"https:\\\/\\\/scontent...\"
+# The lazy body MUST stop at the escaped closing quote — without the trailing
+# \\*" it runs past the end and swallows the whole blob as a single match.
+_IG_DISPLAY_RE = re.compile(r'display_url\\*"\s*:\s*\\*"(https:.*?)\\*"')
+_IG_MAIN_IMG_RE = re.compile(r'class="EmbeddedMediaImage"[^>]*src="([^"]+)"')
+
+# Below this a "caption" is boilerplate rather than a post worth writing from.
+_MIN_CAPTION_CHARS = 30
+
+
+def _instagram_embed_url(url: str) -> str | None:
+    """The /embed/captioned/ URL for an Instagram post, or None if not one."""
+    from urllib.parse import urlparse
+
+    try:
+        parts = urlparse(url)
+    except Exception:
+        return None
+    if "instagram.com" not in parts.netloc.lower():
+        return None
+    match = _IG_SHORTCODE_RE.search(parts.path)
+    if not match:
+        return None
+    return "https://www.instagram.com/p/%s/embed/captioned/" % match.group(1)
+
+
+def _unescape_cdn_url(raw: str) -> str:
+    r"""Undo JS-string escaping around a CDN URL.
+
+    A URL never contains a literal backslash, so once the \uXXXX escapes are
+    resolved (\u0025 is the %-sign in the signed query string), every remaining
+    backslash is escaping punctuation and can simply go.
+    """
+    resolved = re.sub(r"\\+u([0-9a-fA-F]{4})",
+                      lambda m: chr(int(m.group(1), 16)), raw)
+    return resolved.replace("\\", "")
+
+
+def _parse_instagram_embed(html_text: str, url: str) -> dict | None:
+    """Extract caption and post photos from an embed page. Pure, so it is tested
+    against saved fixtures rather than the live network."""
+    caption = ""
+    match = _IG_CAPTION_RE.search(html_text)
+    if match:
+        caption = htmllib.unescape(_IG_TAG_RE.sub(" ", match.group(1)))
+        caption = re.sub(r"\s+", " ", caption).strip()
+        caption = caption.lstrip(">").strip()   # the caption sits in a blockquote
+
+    raw = [_unescape_cdn_url(u) for u in _IG_DISPLAY_RE.findall(html_text)]
+    raw += [htmllib.unescape(u) for u in _IG_MAIN_IMG_RE.findall(html_text)]
+    images = _social_images(raw)
+
+    # A private, deleted or age-gated post returns the same shell with neither
+    # a caption nor photos — report nothing so the caller falls through.
+    if len(caption) < _MIN_CAPTION_CHARS and not images:
+        return None
+    return {"title": "", "text": caption, "images": images, "url": url}
+
+
+def _instagram_embed(url: str) -> dict | None:
+    embed_url = _instagram_embed_url(url)
+    if not embed_url:
+        return None
+    try:
+        with httpx.Client(timeout=15, follow_redirects=True,
+                          headers={"User-Agent": _PLAIN_UA}) as client:
+            resp = client.get(embed_url)
+        if not resp.is_success:
+            return None
+        return _parse_instagram_embed(resp.text, url)
+    except Exception:
+        return None
+
+
+def _resolve_facebook_share(url: str) -> str | None:
+    """Turn a facebook.com/share/... link into its canonical permalink.
+
+    Facebook refuses every user agent here, but the refusal is still useful:
+    the share link 302s straight to the real story.php permalink (a 0-byte
+    response) before a second hop lands on the login page. Following redirects
+    by hand stops at the first hop, so this costs no body download.
+
+    Worth resolving because Tavily reads the two URL shapes with *independent*
+    success — measured on the operator's own links, the share URL returned
+    nothing for a post the permalink read fine (9,548 chars, 6 images), and the
+    reverse happened on another. Trying both covers more than either alone.
+    """
+    from urllib.parse import parse_qs, unquote, urlparse
+
+    try:
+        parts = urlparse(url)
+    except Exception:
+        return None
+    if "facebook.com" not in parts.netloc.lower() or "/share/" not in parts.path:
+        return None
+
+    current = url
+    try:
+        with httpx.Client(timeout=12, follow_redirects=False,
+                          headers={"User-Agent": _PLAIN_UA}) as client:
+            for _ in range(4):
+                resp = client.get(current)
+                if resp.status_code not in (301, 302, 303, 307, 308):
+                    return None
+                location = resp.headers.get("location") or ""
+                if not location:
+                    return None
+                if location.startswith("/"):
+                    location = "https://www.facebook.com" + location
+                # The login hop carries the permalink in ?next=
+                if "/login" in location:
+                    nxt = parse_qs(urlparse(location).query).get("next")
+                    location = unquote(nxt[0]) if nxt else ""
+                if location.startswith("http") and "/share/" not in location \
+                        and "/login" not in location:
+                    return location
+                if not location:
+                    return None
+                current = location
+    except Exception:
+        return None
+    return None
+
+
 _LOGIN_WALL_DOMAINS = (
     "facebook.com", "fb.com", "instagram.com",
     "tiktok.com", "twitter.com", "x.com",
@@ -294,18 +433,36 @@ def scrape(url: str) -> dict:
     host = netloc[4:] if netloc.startswith("www.") else netloc
     is_social = any(host == d or host.endswith("." + d) for d in _LOGIN_WALL_DOMAINS)
 
-    # Social platforms: go straight to Tavily (httpx always gets login walls)
+    # Social platforms: httpx with a browser-like UA always gets a login wall.
     if is_social:
         target = _normalize_social_url(url)
 
-        # Three attempts, each a DIFFERENT strategy rather than the same call
+        # Instagram first, and not through Tavily: the embed endpoint returns
+        # the caption and the whole carousel in ~0.5s with no API key. It also
+        # returns *cleaner* material — a Tavily extract of the same post is
+        # ~12,000 characters of logged-out page chrome with the caption buried
+        # somewhere inside it, and on one of four measured posts not present.
+        embed = _instagram_embed(target)
+        if embed:
+            return embed
+
+        # Each attempt is a DIFFERENT strategy rather than the same call
         # repeated. Repeating an identical failing extract was measured at 3
-        # failures out of 3 attempts, ~6.7s each — blind retries buy only latency.
-        # These three fail independently, so a later one can rescue an earlier one.
-        for depth, with_images in (("advanced", True), ("basic", False)):
-            tavily_result = _tavily_extract(target, depth=depth, with_images=with_images)
+        # failures out of 3, ~6.7s each — blind retries buy only latency. These
+        # fail independently, so a later one can rescue an earlier one.
+        attempts = [target]
+        permalink = _resolve_facebook_share(target)
+        if permalink:
+            attempts.append(_normalize_social_url(permalink))
+
+        for attempt in attempts:
+            tavily_result = _tavily_extract(attempt, depth="advanced", with_images=True)
             if tavily_result and len(tavily_result.get("text", "")) >= 50:
                 return tavily_result
+
+        basic_result = _tavily_extract(target, depth="basic")
+        if basic_result and len(basic_result.get("text", "")) >= 50:
+            return basic_result
 
         search_result = _tavily_search(target)
         if search_result and len(search_result.get("text", "")) >= 50:
