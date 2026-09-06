@@ -110,12 +110,14 @@ def main():
         processed += 1
         updates: dict = {}
         line = [f"{chat_id:>4}"]
+        effective_title = title
 
         if title_eligible:
             new_title = generate_post_title(post_text)
             if new_title and new_title != title:
                 updates["title"] = new_title
                 updates["title_source"] = "post"
+                effective_title = new_title
                 line.append(f"title: {title!r} → {new_title!r}")
                 counts["renamed"] += 1
             else:
@@ -125,7 +127,9 @@ def main():
             by_tool = collect_candidates_from_messages(
                 [{"role": r, "content": c} for r, c in messages]
             )
-            new_url = pick_thumbnail(by_tool)
+            # The title names the building — pick_thumbnail weighs that above
+            # which tool happened to return the image first.
+            new_url = pick_thumbnail(by_tool, effective_title)
             if not new_url:
                 counts["no_image"] += 1
                 line.append("cover: no candidates, left alone")
