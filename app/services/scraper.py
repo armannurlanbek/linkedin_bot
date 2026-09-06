@@ -281,6 +281,15 @@ _IG_MAIN_IMG_RE = re.compile(r'class="EmbeddedMediaImage"[^>]*src="([^"]+)"')
 # Below this a "caption" is boilerplate rather than a post worth writing from.
 _MIN_CAPTION_CHARS = 30
 
+# Tavily returns the logged-out page, so a "successful" extract can be nothing
+# but site chrome. One measured Facebook reel came back as 143 characters of
+# community-guidelines text ("This community is meant to be a helpful place…")
+# and passed the old 50-char floor, which handed Claude boilerplate to write a
+# building post from. A real caption clears this comfortably — the shortest
+# among the operator's own posts is 569 characters — and falling short now
+# routes to the retry-then-ask-the-user path, which is the honest outcome.
+_MIN_SOCIAL_TEXT = 200
+
 
 def _instagram_embed_url(url: str) -> str | None:
     """The /embed/captioned/ URL for an Instagram post, or None if not one."""
@@ -457,15 +466,15 @@ def scrape(url: str) -> dict:
 
         for attempt in attempts:
             tavily_result = _tavily_extract(attempt, depth="advanced", with_images=True)
-            if tavily_result and len(tavily_result.get("text", "")) >= 50:
+            if tavily_result and len(tavily_result.get("text", "")) >= _MIN_SOCIAL_TEXT:
                 return tavily_result
 
         basic_result = _tavily_extract(target, depth="basic")
-        if basic_result and len(basic_result.get("text", "")) >= 50:
+        if basic_result and len(basic_result.get("text", "")) >= _MIN_SOCIAL_TEXT:
             return basic_result
 
         search_result = _tavily_search(target)
-        if search_result and len(search_result.get("text", "")) >= 50:
+        if search_result and len(search_result.get("text", "")) >= _MIN_SOCIAL_TEXT:
             return search_result
 
         platform = _platform_name(host)
