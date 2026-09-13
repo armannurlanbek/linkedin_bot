@@ -98,3 +98,22 @@ Shared-password gate backed by a signed HMAC cookie with a sliding 3-day window.
 A single ~2300-line vanilla-JS file, no build step. Multi-panel model: `chatPanels` keeps one DOM panel per chat in memory and toggles visibility; `chatStreams` maps chatId → `AbortController`; `activeChatId` tracks the visible one. It consumes the stream via **`fetch` + a `ReadableStream` reader** (not `EventSource`), splitting on `\n\n` and dispatching frames through `handleSSEEvent`.
 
 Interruption handling mirrors the backend's finish-on-disconnect: a `TypeError` / "Load failed" / "Failed to fetch" is treated as a benign interruption (`markBackground` shows a calm amber note, chat added to `interruptedChats`) rather than a red error. `recoverInterruptedChat` then polls `GET /api/chats/{id}` — triggered on `visibilitychange→visible` and when re-opening the chat — and rebuilds the panel once the finished assistant reply has landed.
+
+## Skill routing
+
+When the user's request matches an available skill, invoke it via the Skill tool. When in doubt, invoke the skill.
+
+Key routing rules:
+- Product ideas/brainstorming → invoke /office-hours
+- Strategy/scope → invoke /plan-ceo-review
+- Architecture → invoke /plan-eng-review
+- Design system/plan review → invoke /design-consultation or /plan-design-review
+- Full review pipeline → invoke /autoplan
+- Bugs/errors → invoke /investigate
+- QA/testing site behavior → invoke /qa or /qa-only
+- Code review/diff check → invoke /review
+- Visual polish → invoke /design-review
+- Ship/deploy/PR → invoke /ship or /land-and-deploy
+- Save progress → invoke /context-save
+- Resume context → invoke /context-restore
+- Author a backlog-ready spec/issue → invoke /spec
