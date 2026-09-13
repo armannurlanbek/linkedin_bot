@@ -56,6 +56,16 @@
     .delete-btn { opacity: 0; transition: opacity 0.15s; }
     .chat-item:hover .rename-btn { opacity: 1; }
     .rename-btn { opacity: 0; transition: opacity 0.15s; }
+    /* Touch screens have no hover, so these hover-revealed controls were
+       invisible yet still live: a 16px target right beside the chat title.
+       Show them on touch devices, and make them big enough to aim at. */
+    @media (hover: none) {
+      .chat-item .delete-btn, .chat-item .rename-btn {
+        opacity: 0.6;
+        min-width: 32px; min-height: 32px;
+        display: inline-flex; align-items: center; justify-content: center;
+      }
+    }
     .chat-thumb-wrap {
       position: relative;
       width: 44px; height: 44px; flex-shrink: 0;
@@ -752,6 +762,10 @@
         del.title = 'Delete chat';
         del.addEventListener('click', async (e) => {
           e.stopPropagation();
+          // One tap used to delete instantly, and on a phone this button is a
+          // small target beside the title. Deleting cannot be undone, so ask.
+          const name = item.querySelector('.chat-title')?.textContent || 'this chat';
+          if (!confirm(`Delete "${name}"?\nThis cannot be undone.`)) return;
           await deleteChat(chat.id);
         });
         item.appendChild(del);
@@ -1185,6 +1199,14 @@
           if (currentTab === 'posted') renderPostedList();
         } catch (e) {
           console.error('Failed to update posted state', e);
+          // The button used to just flip back with no explanation, which is how
+          // a phone user tapped it 11 times on a chat that had been deleted.
+          if (e.status === 404) {
+            alert('השיחה הזו כבר נמחקה, ולכן אי אפשר לסמן אותה כפורסמה.');
+          } else if (e.message !== 'Unauthorized') {
+            postedBtn.textContent = '⚠ לא נשמר — נסה שוב';
+            setTimeout(paintPostedBtn, 3000);
+          }
         } finally {
           postedBtn.disabled = false;
         }
@@ -1614,7 +1636,7 @@
         body: JSON.stringify(body),
       });
       if (r.status === 401) { showAuthModal(); throw new Error('Unauthorized'); }
-      if (!r.ok) throw new Error(`PATCH ${path} → ${r.status}`);
+      if (!r.ok) { const err = new Error(`PATCH ${path} → ${r.status}`); err.status = r.status; throw err; }
       return r.json();
     }
 
@@ -1710,6 +1732,12 @@
 
       try {
         const chat = await apiGet(`/api/chats/${chatId}`);
+        // The download can finish after the user has moved on: they opened
+        // another chat, or deleted this one while it was still loading. A big
+        // chat on mobile data arrives well after a delete's empty reply, and
+        // rendering it anyway resurrected the deleted chat on screen, where
+        // "mark as posted" then failed against a chat that no longer existed.
+        if (activeChatId !== key) return;
         document.title = chat.title ? `${chat.title} — Roman's Agent` : "Roman's Agent";
 
         if (!chat.messages || chat.messages.length === 0) {
@@ -1800,7 +1828,8 @@
         inputArea.focus();
       } catch (e) {
         console.error('Failed to load chat', e);
-        emptyState.style.display = '';
+        // Same rule: a stale failure must not blank the chat now on screen.
+        if (activeChatId === key) emptyState.style.display = '';
       }
     }
 
